@@ -1,8 +1,10 @@
 DATA ?= data/raw
 OUT  ?= data/clean
+VLM  ?= qwen2.5vl:7b
+SCOPE ?= borderline
 
 .DEFAULT_GOAL := help
-.PHONY: help install run dry-run graph stats lint format typecheck test check clean clean-output
+.PHONY: help install run dry-run run-vlm ollama-serve ollama-pull graph stats lint format typecheck test check clean clean-output
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -15,6 +17,15 @@ run: ## Run cleanup: DATA -> OUT
 
 dry-run: ## Assess DATA and write report only
 	uv run cleanup run --data-dir $(DATA) --output-dir $(OUT) --dry-run
+
+run-vlm: ## Run cleanup with Ollama VLM judge (VLM=..., SCOPE=borderline|survivors)
+	uv run cleanup run --data-dir $(DATA) --output-dir $(OUT) --judge-model $(VLM) --judge-scope $(SCOPE)
+
+ollama-serve: ## Start local Ollama server
+	ollama serve
+
+ollama-pull: ## Download the VLM model
+	ollama pull $(VLM)
 
 graph: ## Write pipeline graph as Mermaid to graph.mmd
 	uv run cleanup graph > graph.mmd

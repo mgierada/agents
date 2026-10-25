@@ -5,6 +5,7 @@ import numpy as np
 from cleanup.checks.image import blur_score
 from cleanup.config import Settings
 from cleanup.graph import build_graph
+from cleanup.judge import JudgeVerdict
 from cleanup.state import ImageRecord
 from tests.conftest import write_image, write_label
 
@@ -62,12 +63,31 @@ def test_borderline_images_go_through_judge(tmp_path: Path, sharp_image: np.ndar
     )
     seen: list[ImageRecord] = []
 
-    def drop_all(record: ImageRecord) -> bool:
+    def drop_all(record: ImageRecord) -> JudgeVerdict:
         seen.append(record)
-        return False
+        return JudgeVerdict(keep=False, reason="nope")
 
     result = build_graph(judge=drop_all).invoke({"settings": settings, "records": []})
 
     assert [r.rel_path for r in seen] == [Path("a.png")]
     assert result["summary"] == {"fail": 1}
-    assert result["records"][0].reasons == ("borderline_blur", "judge:drop")
+    assert result["records"][0].reasons == ("borderline_blur", "judge:drop:nope")
+
+
+def test_survivors_scope_judges_passing_images(
+    tmp_path: Path, sharp_image: np.ndarray, flat_image: np.ndarray
+) -> None:
+    write_image(tmp_path / "raw/images/good.png", sharp_image)
+    write_image(tmp_path / "raw/images/blurry.png", flat_image)
+    settings: Settings = make_settings(tmp_path, judge_scope="survivors")
+    seen: list[Path] = []
+
+    def keep_all(record: ImageRecord) -> JudgeVerdict:
+        seen.append(record.rel_path)
+        return JudgeVerdict(keep=True, reason="fine")
+
+    result = build_graph(judge=keep_all).invoke({"settings": settings, "records": []})
+
+    # Hard failures never reach the judge.
+    assert seen == [Path("good.png")]
+    assert result["summary"] == {"pass": 1, "fail": 1}

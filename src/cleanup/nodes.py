@@ -17,8 +17,8 @@ from cleanup.checks.image import (
     resolution_issues,
 )
 from cleanup.checks.labels import label_issues
-from cleanup.config import Settings
-from cleanup.judge import Judge, policy_judge
+from cleanup.config import JudgeScope, Settings
+from cleanup.judge import Judge, JudgeVerdict, policy_judge
 from cleanup.state import CleanupState, ImageRecord
 
 REPORT_NAME = "report.json"
@@ -79,31 +79,41 @@ def assess_record(record: ImageRecord, settings: Settings) -> ImageRecord:
 
 
 def route_after_assess(state: CleanupState) -> Literal["judge_borderline", "write_output"]:
-    """Send the run through the judge only if any record is borderline."""
-    if any(r.verdict == "borderline" for r in state["records"]):
+    """Send the run through the judge only if any record needs judging."""
+    scope: JudgeScope = state["settings"].judge_scope
+    if any(needs_judging(r, scope) for r in state["records"]):
         return "judge_borderline"
     return "write_output"
+
+
+def needs_judging(record: ImageRecord, scope: JudgeScope) -> bool:
+    """Borderline records are always judged; passing ones too when scope is `survivors`."""
+    return record.verdict == "borderline" or (scope == "survivors" and record.verdict == "pass")
 
 
 def make_judge_node(judge: Judge | None) -> Callable[[CleanupState], dict[str, Any]]:
     """Build the judge node. Falls back to `settings.borderline_policy` when judge is None."""
 
     def judge_borderline(state: CleanupState) -> dict[str, Any]:
-        decide: Judge = judge or policy_judge(state["settings"].borderline_policy)
-        return {"records": [resolve_borderline(r, decide) for r in state["records"]]}
+        settings: Settings = state["settings"]
+        decide: Judge = judge or policy_judge(settings.borderline_policy)
+        records: list[ImageRecord] = [
+            resolve_record(r, decide) if needs_judging(r, settings.judge_scope) else r
+            for r in state["records"]
+        ]
+        return {"records": records}
 
     return judge_borderline
 
 
-def resolve_borderline(record: ImageRecord, decide: Judge) -> ImageRecord:
-    """Turn a borderline record into pass/fail using the judge."""
-    if record.verdict != "borderline":
-        return record
-    keep: bool = decide(record)
+def resolve_record(record: ImageRecord, decide: Judge) -> ImageRecord:
+    """Turn a record into pass/fail using the judge, keeping its reason."""
+    decision: JudgeVerdict = decide(record)
+    action: str = "keep" if decision.keep else "drop"
     return replace(
         record,
-        verdict="pass" if keep else "fail",
-        reasons=(*record.reasons, "judge:keep" if keep else "judge:drop"),
+        verdict="pass" if decision.keep else "fail",
+        reasons=(*record.reasons, f"judge:{action}:{decision.reason}"),
     )
 
 

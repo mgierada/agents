@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+JudgeScope = Literal["borderline", "survivors"]
+
 
 class Settings(BaseSettings):
     """Paths and quality thresholds. Override via `CLEANUP_*` env vars or `.env`."""
@@ -27,6 +29,13 @@ class Settings(BaseSettings):
     min_box_area: float = 1e-4
     allow_empty_labels: bool = True
 
-    # Fallback decision for borderline images when no judge is configured.
+    # Fallback decision when no judge is configured or the judge errors.
     borderline_policy: Literal["keep", "drop"] = "keep"
     dry_run: bool = False
+
+    # Ollama VLM judge. Disabled when judge_model is None.
+    judge_model: str | None = None
+    # "borderline": judge only gray-zone images. "survivors": also every passing image.
+    judge_scope: JudgeScope = "borderline"
+    # Images are downscaled to this longest edge before being sent to the VLM.
+    judge_max_edge: int = 1024

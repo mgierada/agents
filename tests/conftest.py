@@ -1,14 +1,14 @@
 from pathlib import Path
 
-import cv2
 import numpy as np
 import pytest
+from PIL import Image
 
 
 def write_image(path: Path, image: np.ndarray) -> Path:
     """Write an image, creating parent directories."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(path), image)
+    Image.fromarray(image).save(path)
     return path
 
 

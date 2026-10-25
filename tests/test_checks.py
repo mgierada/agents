@@ -19,6 +19,10 @@ def test_blur_score_separates_sharp_and_flat(
     assert blur_score(sharp_image) > 1000.0
 
 
+def test_blur_score_handles_tiny_images() -> None:
+    assert blur_score(np.zeros((2, 2), dtype=np.uint8)) == 0.0
+
+
 @pytest.mark.parametrize(
     ("score", "expected"),
     [(50.0, "fail"), (110.0, "borderline"), (200.0, "pass")],
