@@ -29,10 +29,11 @@ def run(
     }
     if dry_run:
         overrides["dry_run"] = True
+
     settings = Settings(**{k: v for k, v in overrides.items() if v is not None})
     configure_logging(settings.log_level)
     result: dict[str, Any] = build_graph(judge=build_judge(settings)).invoke(
-        {"settings": settings, "records": []}
+        input={"settings": settings, "records": []}
     )
     typer.echo(f"summary: {result.get('summary', {})}")
     typer.echo(f"report: {settings.output_dir / 'report.json'}")

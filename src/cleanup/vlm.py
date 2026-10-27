@@ -44,7 +44,7 @@ class VlmJudge:
     def __call__(self, record: ImageRecord) -> JudgeVerdict:
         """Judge one image. Errors fall back to `fallback_keep` instead of aborting the run."""
         try:
-            result = self.chain.invoke(build_messages(record.image_path, self.max_edge))
+            result = self.chain.invoke(input=build_messages(record.image_path, self.max_edge))
             return JudgeVerdict.model_validate(result)
         except Exception as exc:  # noqa: BLE001 - one bad image or model hiccup must not abort
             log.warning("judge_error", image=str(record.image_path), error=repr(exc))
@@ -53,8 +53,12 @@ class VlmJudge:
 
 def ollama_judge(model: str, fallback_keep: bool, max_edge: int = 1024) -> VlmJudge:
     """Build a VlmJudge backed by a local Ollama model (honours OLLAMA_HOST)."""
-    llm = ChatOllama(model=model, temperature=0)
-    return VlmJudge(llm.with_structured_output(JudgeVerdict), fallback_keep, max_edge)
+    vlm = ChatOllama(model=model, temperature=0)
+    return VlmJudge(
+        chain=vlm.with_structured_output(schema=JudgeVerdict),
+        fallback_keep=fallback_keep,
+        max_edge=max_edge,
+    )
 
 
 def build_messages(image_path: Path, max_edge: int) -> list[BaseMessage]:
