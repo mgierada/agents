@@ -48,3 +48,29 @@ Progress bars (tqdm) show per-stage progress with a live pass/fail tally; struct
 summary per stage. `CLEANUP_LOG_LEVEL=DEBUG make run-vlm` also logs each judge decision.
 
 Thresholds: see `src/cleanup/config.py`; override with `CLEANUP_*` env vars (`.env.example`).
+
+
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	load_dataset(load_dataset)
+	assess_images(assess_images)
+	judge_borderline(judge_borderline)
+	write_output(write_output)
+	write_report(write_report)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> load_dataset;
+	assess_images -.-> judge_borderline;
+	assess_images -.-> write_output;
+	judge_borderline --> write_output;
+	load_dataset --> assess_images;
+	write_output --> write_report;
+	write_report --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+
