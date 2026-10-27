@@ -50,7 +50,7 @@ summary per stage. `CLEANUP_LOG_LEVEL=DEBUG make run-vlm` also logs each judge d
 Thresholds: see `src/cleanup/config.py`; override with `CLEANUP_*` env vars (`.env.example`).
 
 
----
+```mermaid 
 config:
   flowchart:
     curve: linear
@@ -73,4 +73,4 @@ graph TD;
 	classDef default fill:#f2f0ff,line-height:1.2
 	classDef first fill-opacity:0
 	classDef last fill:#bfb6fc
-
+```
