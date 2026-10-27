@@ -11,10 +11,12 @@ Verdict = Literal["pass", "fail", "borderline"]
 
 @dataclass(frozen=True)
 class ImageRecord:
-    """One image/label pair and the result of assessing it."""
+    """One image/annotation pair and the result of assessing it."""
 
     image_path: Path
-    label_path: Path
+    # Paired annotation (YOLO txt or Darwin JSON); None if the image has none.
+    label_path: Path | None
+    # Image path relative to data_dir; mirrored under output_dir.
     rel_path: Path
     width: int = 0
     height: int = 0

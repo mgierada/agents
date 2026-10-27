@@ -32,6 +32,8 @@ class Settings(BaseSettings):
     # Fallback decision when no judge is configured or the judge errors.
     borderline_policy: Literal["keep", "drop"] = "keep"
     dry_run: bool = False
+    # DEBUG also logs every judge decision with its reason.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
     # Ollama VLM judge. Disabled when judge_model is None.
     judge_model: str | None = None

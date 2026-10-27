@@ -2,10 +2,10 @@
 
 import base64
 import io
-import logging
 from pathlib import Path
 from typing import Any
 
+import structlog
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
 from langchain_ollama import ChatOllama
@@ -15,17 +15,17 @@ from cleanup.checks.image import open_image
 from cleanup.judge import JudgeVerdict
 from cleanup.state import ImageRecord
 
-logger = logging.getLogger(__name__)
+log = structlog.get_logger()
 
 JPEG_QUALITY = 90
 
-SYSTEM_PROMPT = (
-    "You review images for an object-detection training dataset. "
-    "Drop an image if it is too blurry, badly exposed, heavily occluded, corrupted, "
-    "mostly empty, or otherwise unlikely to help a detector learn. "
-    "Keep it if the scene and objects are reasonably visible. "
-    "Answer with a keep/drop decision and one short reason."
-)
+SYSTEM_PROMPT = """You are a logo quality expert. You review images for a object-detection 
+    training dataset. The training images contains logos of vairous brands. Drop an image if 
+    the logo is too blurry, badly exposed, heavily occluded and tiny Drop the image if it corrupted 
+    and mostly empty, or otherwise unlikely to help a detector learn logo objects. Keep it if 
+    the scene and logos are reasonably visible. Answer with a keep|drop decision and one 
+    sentence reason.
+    """
 USER_PROMPT = "Should this image be kept in the training set?"
 
 
@@ -49,7 +49,7 @@ class VlmJudge:
             result = self.chain.invoke(build_messages(record.image_path, self.max_edge))
             return JudgeVerdict.model_validate(result)
         except Exception as exc:  # noqa: BLE001 - one bad image or model hiccup must not abort
-            logger.warning("VLM judge failed on %s: %s", record.image_path, exc)
+            log.warning("judge_error", image=str(record.image_path), error=repr(exc))
             return JudgeVerdict(keep=self.fallback_keep, reason=f"judge_error:{type(exc).__name__}")
 
 

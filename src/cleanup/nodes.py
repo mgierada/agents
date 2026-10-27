@@ -8,6 +8,8 @@ from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, Literal
 
+import structlog
+
 from cleanup.checks.image import (
     blur_score,
     brightness,
@@ -18,35 +20,62 @@ from cleanup.checks.image import (
 )
 from cleanup.checks.labels import label_issues
 from cleanup.config import JudgeScope, Settings
+from cleanup.console import progress
+from cleanup.dataset import find_label, is_image, metadata_files, walk_files
 from cleanup.judge import Judge, JudgeVerdict, policy_judge
 from cleanup.state import CleanupState, ImageRecord
 
 REPORT_NAME = "report.json"
 
+log = structlog.get_logger()
+
 
 def load_dataset(state: CleanupState) -> dict[str, Any]:
-    """Discover images under `data_dir/images` and pair them with `data_dir/labels`."""
+    """Discover images anywhere under `data_dir` (following symlinks) and pair annotations."""
     settings: Settings = state["settings"]
-    images_root: Path = settings.data_dir / "images"
-    labels_root: Path = settings.data_dir / "labels"
-    paths: list[Path] = sorted(
-        p for p in images_root.rglob("*") if p.suffix.lower() in settings.image_exts
-    )
+    data_dir: Path = settings.data_dir
     records: list[ImageRecord] = [
         ImageRecord(
             image_path=p,
-            label_path=(labels_root / p.relative_to(images_root)).with_suffix(".txt"),
-            rel_path=p.relative_to(images_root),
+            label_path=find_label(p, data_dir),
+            rel_path=p.relative_to(data_dir),
         )
-        for p in paths
+        for p in progress(walk_files(data_dir), desc="scan", unit="file")
+        if is_image(p, settings.image_exts)
     ]
+    labelled: int = sum(r.label_path is not None for r in records)
+    log.info("dataset_loaded", data_dir=str(data_dir), images=len(records), labelled=labelled)
     return {"records": records}
 
 
 def assess_images(state: CleanupState) -> dict[str, Any]:
     """Run deterministic checks on every record and assign a verdict."""
     settings: Settings = state["settings"]
-    return {"records": [assess_record(r, settings) for r in state["records"]]}
+    records = map_records(state["records"], lambda r: assess_record(r, settings), desc="assess")
+    return {"records": records}
+
+
+def map_records(
+    records: list[ImageRecord],
+    fn: Callable[[ImageRecord], ImageRecord],
+    desc: str,
+    select: Callable[[ImageRecord], bool] = lambda _r: True,
+) -> list[ImageRecord]:
+    """Apply `fn` to selected records with a progress bar showing a live verdict tally."""
+    counts: Counter[str] = Counter()
+    result: list[ImageRecord] = []
+    with progress(desc=desc, total=sum(map(select, records))) as bar:
+        for record in records:
+            if not select(record):
+                result.append(record)
+                continue
+            updated: ImageRecord = fn(record)
+            counts[updated.verdict] += 1
+            bar.set_postfix(counts, refresh=False)
+            bar.update()
+            result.append(updated)
+    log.info(f"{desc}_done", **counts)
+    return result
 
 
 def assess_record(record: ImageRecord, settings: Settings) -> ImageRecord:
@@ -63,7 +92,7 @@ def assess_record(record: ImageRecord, settings: Settings) -> ImageRecord:
     failures: list[str] = [
         *resolution_issues(width, height, settings.min_width, settings.min_height),
         *brightness_issues(bright, settings.brightness_min, settings.brightness_max),
-        *label_issues(record.label_path, settings.min_box_area, settings.allow_empty_labels),
+        *annotation_issues(record.label_path, settings),
         *(["blurry"] if blur_verdict == "fail" else []),
     ]
     is_borderline: bool = not failures and blur_verdict == "borderline"
@@ -76,6 +105,15 @@ def assess_record(record: ImageRecord, settings: Settings) -> ImageRecord:
         verdict="fail" if failures else ("borderline" if is_borderline else "pass"),
         reasons=tuple(failures) or (("borderline_blur",) if is_borderline else ()),
     )
+
+
+def annotation_issues(label_path: Path | None, settings: Settings) -> list[str]:
+    """Validate YOLO txt labels. Other formats (Darwin JSON) are copied unvalidated."""
+    if label_path is None:
+        return [] if settings.allow_empty_labels else ["missing_label"]
+    if label_path.suffix != ".txt":
+        return []
+    return label_issues(label_path, settings.min_box_area, settings.allow_empty_labels)
 
 
 def route_after_assess(state: CleanupState) -> Literal["judge_borderline", "write_output"]:
@@ -97,10 +135,12 @@ def make_judge_node(judge: Judge | None) -> Callable[[CleanupState], dict[str, A
     def judge_borderline(state: CleanupState) -> dict[str, Any]:
         settings: Settings = state["settings"]
         decide: Judge = judge or policy_judge(settings.borderline_policy)
-        records: list[ImageRecord] = [
-            resolve_record(r, decide) if needs_judging(r, settings.judge_scope) else r
-            for r in state["records"]
-        ]
+        records: list[ImageRecord] = map_records(
+            state["records"],
+            lambda r: resolve_record(r, decide),
+            desc="judge",
+            select=lambda r: needs_judging(r, settings.judge_scope),
+        )
         return {"records": records}
 
     return judge_borderline
@@ -110,6 +150,7 @@ def resolve_record(record: ImageRecord, decide: Judge) -> ImageRecord:
     """Turn a record into pass/fail using the judge, keeping its reason."""
     decision: JudgeVerdict = decide(record)
     action: str = "keep" if decision.keep else "drop"
+    log.debug("judged", image=str(record.rel_path), action=action, reason=decision.reason)
     return replace(
         record,
         verdict="pass" if decision.keep else "fail",
@@ -118,16 +159,23 @@ def resolve_record(record: ImageRecord, decide: Judge) -> ImageRecord:
 
 
 def write_output(state: CleanupState) -> dict[str, Any]:
-    """Copy passing images and labels into `output_dir`, mirroring the source layout."""
+    """Mirror `data_dir` into `output_dir` as real files: passing images, their annotations,
+    and dataset metadata (e.g. `classes/`). Symlinks in the source are followed, not copied.
+    """
     settings: Settings = state["settings"]
     if settings.dry_run:
         return {}
-    # TODO: also copy dataset metadata (data.yaml / classes.txt) when present.
-    for record in (r for r in state["records"] if r.verdict == "pass"):
-        copy_file(record.image_path, settings.output_dir / "images" / record.rel_path)
-        if record.label_path.exists():
-            label_rel: Path = record.rel_path.with_suffix(".txt")
-            copy_file(record.label_path, settings.output_dir / "labels" / label_rel)
+    data_dir: Path = settings.data_dir
+    out: Path = settings.output_dir
+    passing: list[ImageRecord] = [r for r in state["records"] if r.verdict == "pass"]
+    for record in progress(passing, desc="copy"):
+        copy_file(record.image_path, out / record.rel_path)
+        if record.label_path is not None:
+            copy_file(record.label_path, out / record.label_path.relative_to(data_dir))
+    metadata: list[Path] = list(metadata_files(data_dir, settings.image_exts))
+    for path in metadata:
+        copy_file(path, out / path.relative_to(data_dir))
+    log.info("output_written", output_dir=str(out), images=len(passing), metadata=len(metadata))
     return {}
 
 
@@ -142,10 +190,11 @@ def write_report(state: CleanupState) -> dict[str, Any]:
     settings.output_dir.mkdir(parents=True, exist_ok=True)
     report_path: Path = settings.output_dir / REPORT_NAME
     report_path.write_text(json.dumps(report, indent=2, default=str))
+    log.info("report_written", path=str(report_path), **summary)
     return {"summary": summary}
 
 
 def copy_file(src: Path, dst: Path) -> None:
-    """Copy a file, creating parent directories."""
+    """Copy a file's contents (following symlinks), creating parent directories."""
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src, dst)
+    shutil.copy2(src, dst, follow_symlinks=True)

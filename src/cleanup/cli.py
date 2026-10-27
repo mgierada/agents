@@ -6,6 +6,7 @@ from typing import Annotated, Any
 import typer
 
 from cleanup.config import Settings
+from cleanup.console import configure_logging
 from cleanup.graph import build_graph
 from cleanup.judge import Judge
 from cleanup.vlm import ollama_judge
@@ -31,6 +32,7 @@ def run(
     if dry_run:
         overrides["dry_run"] = True
     settings = Settings(**{k: v for k, v in overrides.items() if v is not None})
+    configure_logging(settings.log_level)
     result: dict[str, Any] = build_graph(judge=build_judge(settings)).invoke(
         {"settings": settings, "records": []}
     )

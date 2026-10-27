@@ -44,4 +44,7 @@ make run-vlm DATA=data/raw SCOPE=survivors
 VLM reasons land in `report.json` as `judge:keep|drop:<reason>`. If the model errors, the image
 falls back to `borderline_policy` with reason `judge_error:<Exception>`.
 
+Progress bars (tqdm) show per-stage progress with a live pass/fail tally; structlog prints a
+summary per stage. `CLEANUP_LOG_LEVEL=DEBUG make run-vlm` also logs each judge decision.
+
 Thresholds: see `src/cleanup/config.py`; override with `CLEANUP_*` env vars (`.env.example`).

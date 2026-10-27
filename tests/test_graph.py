@@ -69,7 +69,7 @@ def test_borderline_images_go_through_judge(tmp_path: Path, sharp_image: np.ndar
 
     result = build_graph(judge=drop_all).invoke({"settings": settings, "records": []})
 
-    assert [r.rel_path for r in seen] == [Path("a.png")]
+    assert [r.rel_path for r in seen] == [Path("images/a.png")]
     assert result["summary"] == {"fail": 1}
     assert result["records"][0].reasons == ("borderline_blur", "judge:drop:nope")
 
@@ -89,5 +89,5 @@ def test_survivors_scope_judges_passing_images(
     result = build_graph(judge=keep_all).invoke({"settings": settings, "records": []})
 
     # Hard failures never reach the judge.
-    assert seen == [Path("good.png")]
+    assert seen == [Path("images/good.png")]
     assert result["summary"] == {"pass": 1, "fail": 1}
