@@ -51,6 +51,7 @@ Thresholds: see `src/cleanup/config.py`; override with `CLEANUP_*` env vars (`.e
 
 
 ```mermaid
+---
 config:
   flowchart:
     curve: linear
