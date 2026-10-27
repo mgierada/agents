@@ -36,12 +36,12 @@ def load_dataset(state: CleanupState) -> dict[str, Any]:
     data_dir: Path = settings.data_dir
     records: list[ImageRecord] = [
         ImageRecord(
-            image_path=p,
-            label_path=find_label(p, data_dir),
-            rel_path=p.relative_to(data_dir),
+            image_path=path,
+            label_path=find_label(image_path=path, data_dir=data_dir),
+            rel_path=path.relative_to(data_dir),
         )
-        for p in progress(walk_files(data_dir), desc="scan", unit="file")
-        if is_image(p, settings.image_exts)
+        for path in progress(iterable=walk_files(root=data_dir), desc="scan", unit="file")
+        if is_image(path, settings.image_exts)
     ]
     labelled: int = sum(r.label_path is not None for r in records)
     log.info("dataset_loaded", data_dir=str(data_dir), images=len(records), labelled=labelled)
@@ -51,7 +51,11 @@ def load_dataset(state: CleanupState) -> dict[str, Any]:
 def assess_images(state: CleanupState) -> dict[str, Any]:
     """Run deterministic checks on every record and assign a verdict."""
     settings: Settings = state["settings"]
-    records = map_records(state["records"], lambda r: assess_record(r, settings), desc="assess")
+    records: list[ImageRecord] = map_records(
+        records=state["records"],
+        fn=lambda r: assess_record(record=r, settings=settings),
+        desc="assess",
+    )
     return {"records": records}
 
 
@@ -87,15 +91,20 @@ def assess_record(record: ImageRecord, settings: Settings) -> ImageRecord:
     height, width = gray.shape[:2]
     blur: float = blur_score(gray)
     bright: float = brightness(gray)
-    blur_verdict = grade_blur(blur, settings.blur_threshold, settings.borderline_margin)
+    blur_verdict = grade_blur(
+        score=blur, threshold=settings.blur_threshold, margin=settings.borderline_margin
+    )
 
     failures: list[str] = [
-        *resolution_issues(width, height, settings.min_width, settings.min_height),
-        *brightness_issues(bright, settings.brightness_min, settings.brightness_max),
+        *resolution_issues(
+            width=width, height=height, min_width=settings.min_width, min_height=settings.min_height
+        ),
+        *brightness_issues(value=bright, min=settings.brightness_min, max=settings.brightness_max),
         *annotation_issues(record.label_path, settings),
         *(["blurry"] if blur_verdict == "fail" else []),
     ]
     is_borderline: bool = not failures and blur_verdict == "borderline"
+
     return replace(
         record,
         width=width,
@@ -119,7 +128,7 @@ def annotation_issues(label_path: Path | None, settings: Settings) -> list[str]:
 def route_after_assess(state: CleanupState) -> Literal["judge_borderline", "write_output"]:
     """Send the run through the judge only if any record needs judging."""
     scope: JudgeScope = state["settings"].judge_scope
-    if any(needs_judging(r, scope) for r in state["records"]):
+    if any(needs_judging(record=r, scope=scope) for r in state["records"]):
         return "judge_borderline"
     return "write_output"
 
@@ -136,10 +145,10 @@ def make_judge_node(judge: Judge | None) -> Callable[[CleanupState], dict[str, A
         settings: Settings = state["settings"]
         decide: Judge = judge or policy_judge(settings.borderline_policy)
         records: list[ImageRecord] = map_records(
-            state["records"],
-            lambda r: resolve_record(r, decide),
+            records=state["records"],
+            fn=lambda r: resolve_record(record=r, decide=decide),
             desc="judge",
-            select=lambda r: needs_judging(r, settings.judge_scope),
+            select=lambda r: needs_judging(record=r, scope=settings.judge_scope),
         )
         return {"records": records}
 
@@ -169,12 +178,12 @@ def write_output(state: CleanupState) -> dict[str, Any]:
     out: Path = settings.output_dir
     passing: list[ImageRecord] = [r for r in state["records"] if r.verdict == "pass"]
     for record in progress(passing, desc="copy"):
-        copy_file(record.image_path, out / record.rel_path)
+        copy_file(src=record.image_path, dst=out / record.rel_path)
         if record.label_path is not None:
-            copy_file(record.label_path, out / record.label_path.relative_to(data_dir))
+            copy_file(src=record.label_path, dst=out / record.label_path.relative_to(data_dir))
     metadata: list[Path] = list(metadata_files(data_dir, settings.image_exts))
     for path in metadata:
-        copy_file(path, out / path.relative_to(data_dir))
+        copy_file(src=path, dst=out / path.relative_to(data_dir))
     log.info("output_written", output_dir=str(out), images=len(passing), metadata=len(metadata))
     return {}
 
@@ -189,7 +198,7 @@ def write_report(state: CleanupState) -> dict[str, Any]:
     }
     settings.output_dir.mkdir(parents=True, exist_ok=True)
     report_path: Path = settings.output_dir / REPORT_NAME
-    report_path.write_text(json.dumps(report, indent=2, default=str))
+    report_path.write_text(data=json.dumps(report, indent=2, default=str))
     log.info("report_written", path=str(report_path), **summary)
     return {"summary": summary}
 

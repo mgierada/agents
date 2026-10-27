@@ -1,5 +1,3 @@
-"""Runtime settings for the cleanup pipeline."""
-
 from pathlib import Path
 from typing import Literal
 

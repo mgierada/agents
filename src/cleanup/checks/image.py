@@ -1,5 +1,3 @@
-"""Image-level quality checks."""
-
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +8,7 @@ from cleanup.state import Verdict
 
 def open_image(path: Path) -> Image.Image:
     """Open an image with EXIF orientation applied. Raises OSError if unreadable."""
-    with Image.open(path) as image:
+    with Image.open(fp=path) as image:
         image.load()
         return ImageOps.exif_transpose(image)
 
@@ -18,7 +16,7 @@ def open_image(path: Path) -> Image.Image:
 def load_gray(path: Path) -> np.ndarray | None:
     """Load an image as a grayscale array. Returns None if the file is unreadable."""
     try:
-        return np.asarray(open_image(path).convert("L"))
+        return np.asarray(open_image(path).convert(mode="L"))
     except OSError:
         return None
 
@@ -53,10 +51,10 @@ def resolution_issues(width: int, height: int, min_width: int, min_height: int) 
     return []
 
 
-def brightness_issues(value: float, minimum: float, maximum: float) -> list[str]:
+def brightness_issues(value: float, min: float, max: float) -> list[str]:
     """Return reasons if the image is under- or over-exposed."""
-    if value < minimum:
+    if value < min:
         return ["too_dark"]
-    if value > maximum:
+    if value > max:
         return ["too_bright"]
     return []

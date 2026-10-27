@@ -1,5 +1,3 @@
-"""YOLO bounding-box label checks."""
-
 from pathlib import Path
 
 YOLO_BOX_FIELDS = 5

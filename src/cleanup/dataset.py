@@ -1,9 +1,3 @@
-"""Dataset discovery. Follows symlinks and supports any number of nested dataset roots.
-
-A dataset root is any directory holding an `images/` dir. Each image is paired with a sibling
-annotation by mirroring its path under `labels/` (YOLO txt) or `annotations/` (Darwin JSON).
-"""
-
 import os
 from collections.abc import Iterator
 from pathlib import Path
@@ -19,8 +13,8 @@ def walk_files(root: Path) -> Iterator[Path]:
     Yielded paths keep the symlinked (unresolved) form so they stay relative to `root`.
     """
     seen: set[str] = set()
-    for dirpath, dirnames, filenames in os.walk(root, followlinks=True):
-        real: str = os.path.realpath(dirpath)
+    for dirpath, dirnames, filenames in os.walk(top=root, followlinks=True):
+        real: str = os.path.realpath(filename=dirpath)
         if real in seen:
             dirnames.clear()
             continue

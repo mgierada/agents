@@ -1,5 +1,3 @@
-"""Vision-language-model judge. Defaults to a free local model served by Ollama."""
-
 import base64
 import io
 from pathlib import Path
@@ -75,8 +73,8 @@ def build_messages(image_path: Path, max_edge: int) -> list[BaseMessage]:
 
 def encode_image(path: Path, max_edge: int) -> str:
     """Load an image, downscale so its longest edge is <= max_edge, return base64 JPEG."""
-    image = open_image(path).convert("RGB")
-    image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
+    image: Image.Image = open_image(path).convert(mode="RGB")
+    image.thumbnail(size=(max_edge, max_edge), resample=Image.Resampling.LANCZOS)
     buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=JPEG_QUALITY)
-    return base64.b64encode(buffer.getvalue()).decode("ascii")
+    image.save(fp=buffer, format="JPEG", quality=JPEG_QUALITY)
+    return base64.b64encode(s=buffer.getvalue()).decode(encoding="ascii")

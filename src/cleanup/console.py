@@ -1,5 +1,3 @@
-"""Console output: structlog setup and tqdm progress bars that don't tear each other up."""
-
 import logging
 import sys
 from collections.abc import Iterable
@@ -33,7 +31,7 @@ def configure_logging(level: str = "INFO") -> None:
             structlog.dev.ConsoleRenderer(),
         ],
         wrapper_class=structlog.make_filtering_bound_logger(
-            logging.getLevelNamesMapping()[level.upper()]
+            min_level=logging.getLevelNamesMapping()[level.upper()]
         ),
         logger_factory=tqdm_logger_factory,
         cache_logger_on_first_use=True,

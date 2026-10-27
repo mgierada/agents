@@ -1,5 +1,3 @@
-"""Pluggable judges that resolve images to keep/drop."""
-
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, Field
