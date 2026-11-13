@@ -9,9 +9,10 @@ verdict to judgements.jsonl; a re-run skips crops this judge already reviewed.
 import hashlib
 import json
 import re
+import threading
 from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -97,7 +98,24 @@ def review_run(settings: GallerySettings, run: str, scope: ReviewScope) -> dict[
         references=references,
     )
     log.info("review_start", run=run, judge=settings.judge, units=len(units), crops=pending.height)
-    run_parallel(units, reviewer, settings.review_workers, paths)
+    tracker = ProgressTracker(
+        path=paths.progress,
+        judge=settings.judge,
+        total_units=len(units),
+        total_crops=sum(len(u.crop_ids) for u in units),
+    )
+    tracker.write_queue(
+        paths.review_queue,
+        [c for u in units for c in u.crop_ids],
+        units_offset=paths.units.stat().st_size if paths.units.exists() else 0,
+    )
+    tracker.write()
+    try:
+        run_parallel(units, reviewer, settings.review_workers, paths, tracker)
+    except BaseException:
+        tracker.finish("stopped")
+        raise
+    tracker.finish("finished")
     usage: dict[str, int] = chain_usage(chain)
     jsonl.append(
         paths.review_log,
@@ -115,6 +133,57 @@ def review_run(settings: GallerySettings, run: str, scope: ReviewScope) -> dict[
     )
     log.info("review_done", run=run, **usage)
     return usage
+
+
+def judge_one(settings: GallerySettings, run: str, crop_id: str, judge: str) -> dict[str, Any]:
+    """Judge one crop with `judge` (a second opinion from the UI) and log it like a review.
+
+    Uses the same sheet, prompt, retries and logs as `review_run`: the verdict goes to
+    judgements.jsonl (newest verdict wins), the call to units.jsonl and review_log.jsonl (so
+    spend is counted). Hard-flagged crops are judged too: you asked for this one explicitly.
+    Raises ValueError when the crop is unknown or the call fails.
+    """
+    paths, crops = load_run(settings, run)
+    match: pl.DataFrame = crops.filter(pl.col("crop_id") == crop_id)
+    if match.is_empty():
+        raise ValueError(f"unknown crop_id {crop_id!r}")
+    crop: dict[str, Any] = match.row(0, named=True)
+    one: GallerySettings = settings.model_copy(update={"judge": judge})
+    catalog: BrandCatalog = load_catalog(
+        one.target_list, one.aliases, fallback=crops["brand"].unique().to_list()
+    )
+    chain: Runnable[list[BaseMessage], Any] = build_chain(
+        spec=judge, schema=MontageVerdict, effort=one.judge_effort
+    )
+    reviewer = UnitReviewer(
+        settings=one,
+        paths=paths,
+        chain=chain,
+        system=system_prompt(catalog.targets),
+        references=ensure_references(one, paths, [crop["brand"]]),
+    )
+    rows, unit_row = reviewer(make_unit(crop["brand"], int(crop["cluster"]), [crop_id]))
+    jsonl.append(paths.judgements, rows)
+    jsonl.append(paths.units, [unit_row | {"source": "ui"}])
+    usage: dict[str, int] = chain_usage(chain)
+    jsonl.append(
+        paths.review_log,
+        [
+            {
+                "ts": jsonl.now(),
+                "judge": judge,
+                "effort": one.judge_effort,
+                "scope": {"source": "ui", "crop_id": crop_id},
+                "units": 1,
+                "crops": 1,
+                "usage": usage,
+            }
+        ],
+    )
+    if "error" in unit_row or not rows:
+        raise ValueError(f"{judge} failed: {unit_row.get('error', 'no verdict for the crop')}")
+    log.info("second_opinion", crop=crop_id, judge=judge, verdict=rows[0]["verdict"])
+    return rows[0] | {"usage": usage}
 
 
 def pending_crops(
@@ -234,7 +303,11 @@ class UnitReviewer:
             verdict: MontageVerdict = self.judge(unit)
         except Exception as exc:  # noqa: BLE001 - one failed call must not abort the run
             log.warning("unit_error", unit=unit.unit_id, error=repr(exc))
-            return [], base | {"n_tiles": len(unit.crop_ids), "error": repr(exc)}
+            return [], base | {
+                "n_tiles": len(unit.crop_ids),
+                "error": repr(exc),
+                "crop_ids": list(unit.crop_ids),
+            }
         rows: list[dict[str, Any]] = tile_rows(unit, verdict, base)
         return rows, base | {
             "n_tiles": len(unit.crop_ids),
@@ -309,16 +382,109 @@ def run_parallel(
     reviewer: Callable[[ReviewUnit], tuple[list[dict[str, Any]], dict[str, Any]]],
     workers: int,
     paths: RunPaths,
+    tracker: "ProgressTracker | None" = None,
 ) -> None:
     """Review units concurrently, appending results as each one finishes."""
+
+    def tracked(unit: ReviewUnit) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        if tracker is not None:
+            tracker.start(unit)
+        return reviewer(unit)
+
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures: list[Future[tuple[list[dict[str, Any]], dict[str, Any]]]] = [
-            pool.submit(reviewer, u) for u in units
+            pool.submit(tracked, u) for u in units
         ]
         for future in progress(completed(futures), desc="review", total=len(units), unit="unit"):
             rows, unit_row = future.result()
             jsonl.append(paths.judgements, rows)
             jsonl.append(paths.units, [unit_row])
+            if tracker is not None:
+                tracker.record(unit_row)
+
+
+@dataclass
+class ProgressTracker:
+    """Writes review_progress.json for the UI: counts, status and the crops being judged now.
+
+    Worker threads call `start`, the main thread `record`; a lock keeps the file consistent.
+    """
+
+    path: Path
+    judge: str
+    total_units: int
+    total_crops: int
+    started: str = field(default_factory=jsonl.now)
+    done_units: int = 0
+    done_crops: int = 0
+    errors: int = 0
+    status: str = "running"
+    judging: dict[str, list[str]] = field(default_factory=dict)
+    lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
+
+    def write_queue(self, path: Path, crop_ids: list[str], units_offset: int) -> None:
+        """Every crop this review will judge, written once at the start.
+
+        `units_offset` is units.jsonl's size before this review: rows after it are this
+        review's finished units (timestamps alone are too coarse to tell).
+        """
+        atomic_write(
+            path,
+            {
+                "judge": self.judge,
+                "started": self.started,
+                "units_offset": units_offset,
+                "crop_ids": crop_ids,
+            },
+        )
+
+    def start(self, unit: "ReviewUnit") -> None:
+        """A worker began judging `unit`."""
+        with self.lock:
+            self.judging[unit.unit_id] = list(unit.crop_ids)
+            self.write()
+
+    def record(self, unit_row: dict[str, Any]) -> None:
+        """Count one finished unit (successful or not) and rewrite the file."""
+        with self.lock:
+            self.judging.pop(unit_row["unit_id"], None)
+            self.done_units += 1
+            self.done_crops += unit_row.get("n_tiles", 0)
+            self.errors += "error" in unit_row
+            self.write()
+
+    def finish(self, status: str) -> None:
+        """Mark the review finished or stopped; nothing is being judged any more."""
+        with self.lock:
+            self.status = status
+            self.judging.clear()
+            self.write()
+
+    def write(self) -> None:
+        """Rewrite review_progress.json."""
+        with self.lock:
+            atomic_write(
+                self.path,
+                {
+                    "judge": self.judge,
+                    "total_units": self.total_units,
+                    "total_crops": self.total_crops,
+                    "started": self.started,
+                    "done_units": self.done_units,
+                    "done_crops": self.done_crops,
+                    "errors": self.errors,
+                    "status": self.status,
+                    "judging": self.judging,
+                    "updated": jsonl.now(),
+                },
+            )
+
+
+def atomic_write(path: Path, data: dict[str, Any]) -> None:
+    """Replace a JSON file in one step, so the UI never reads half of it."""
+    tmp: Path = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data))
+    tmp.replace(path)
 
 
 def completed(futures: list[Future[Any]]) -> Iterator[Future[Any]]:

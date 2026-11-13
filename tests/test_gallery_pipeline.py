@@ -1,6 +1,7 @@
 """init -> review -> resolve -> calibrate -> UI API on a tiny synthetic gallery, with a fake
 judge (no model calls)."""
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,7 @@ from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableLambda
 
 import cleanup.gallery.review as review
+import cleanup.llm as llm
 from cleanup.gallery import jsonl
 from cleanup.gallery.brands import BrandCatalog
 from cleanup.gallery.calibrate import calibrate_run
@@ -23,6 +25,9 @@ from cleanup.gallery.server import (
     api_accept_relabels,
     api_items,
     api_label,
+    api_meta,
+    api_progress,
+    api_rejudge,
     api_spend,
 )
 from cleanup.gallery.subset import Subset
@@ -374,3 +379,134 @@ def test_plot_writes_calibration_charts(settings: GallerySettings, reviewed: Run
         "precision_recall.png",
     ]
     assert all(p.stat().st_size > 0 for p in written)
+
+
+def test_review_writes_progress_for_the_ui(settings: GallerySettings, reviewed: RunPaths) -> None:
+    progress: dict[str, Any] = api_progress(RunState(settings=settings, run="r1"))
+
+    assert progress["status"] == "finished"
+    assert progress["done_units"] == progress["total_units"] == len(jsonl.read(reviewed.units))
+    assert progress["done_crops"] == progress["total_crops"]
+    assert progress["errors"] == 0
+
+
+def test_interrupted_review_is_marked_stopped(
+    settings: GallerySettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def interrupted(_messages: list[BaseMessage]) -> Any:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(review, "build_chain", lambda **_: RunnableLambda(interrupted))
+    paths: RunPaths = init_run(settings, "r1", Subset(brands=("acme",)))
+    monkeypatch.setattr(review.UnitReviewer, "__call__", lambda self, unit: interrupted([]))
+
+    with pytest.raises(KeyboardInterrupt):
+        review.review_run(settings, "r1", review.ReviewScope())
+
+    assert json.loads(paths.progress.read_text())["status"] == "stopped"
+
+
+def test_ui_gets_refresh_interval_from_settings(
+    settings: GallerySettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CLEANUP_GALLERY_UI_REFRESH_SECONDS", "3")
+    configured = GallerySettings(**settings.model_dump(exclude={"ui_refresh_seconds"}))
+    init_run(configured, "r1", Subset())
+    state = RunState(settings=configured, run="r1")
+
+    assert api_meta(state)["refresh_seconds"] == 3
+    assert api_progress(state) == {"status": "none"}
+
+
+def test_review_filter_shows_pending_queued_and_judging(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    state = RunState(settings=settings, run="r1")
+    judged: list[str] = sorted(jsonl.latest_by(jsonl.read(reviewed.judgements), "crop_id"))
+    unjudged: set[str] = set(state.items["crop_id"]) - set(judged)
+    queued, judging, finished = judged[0], judged[1], judged[2]
+
+    # Simulate a running --rejudge over three crops: one finished, one in a worker, one queued.
+    tracker = review.ProgressTracker(
+        path=reviewed.progress, judge="fake:judge", total_units=3, total_crops=3
+    )
+    tracker.write_queue(
+        reviewed.review_queue,
+        [queued, judging, finished],
+        units_offset=reviewed.units.stat().st_size,
+    )
+    tracker.start(review.ReviewUnit("u-judging", "acme", 0, (judging,)))
+    jsonl.append(
+        reviewed.units,
+        [{"unit_id": "u-done", "judge": "fake:judge", "ts": jsonl.now(), "crop_ids": [finished]}],
+    )
+
+    def ids(review_value: str) -> set[str]:
+        page: dict[str, Any] = api_items(state, {"review": review_value, "limit": "500"})
+        return {i["crop_id"] for i in page["items"]}
+
+    assert ids("judging") == {judging}
+    assert ids("in_review") == {queued, judging}
+    assert ids("pending") == unjudged | {queued, judging}
+    assert ids("not_judged") == unjudged
+    assert finished in ids("judged") and queued not in ids("judged")
+    statuses: dict[str, str | None] = {
+        i["crop_id"]: i["review_status"] for i in api_items(state, {"limit": "500"})["items"]
+    }
+    assert (statuses[judging], statuses[queued], statuses[finished]) == ("judging", "queued", None)
+
+    tracker.finish("finished")
+    assert ids("in_review") == set()
+
+
+def test_failed_units_record_their_crops(
+    settings: GallerySettings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def denied(_messages: list[BaseMessage]) -> Any:
+        raise RuntimeError("401")
+
+    paths: RunPaths = review_with(settings, monkeypatch, denied)
+
+    assert all(u["crop_ids"] for u in jsonl.read(paths.units))
+
+
+def test_second_opinion_from_ui_is_logged_and_confirms_relabel(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
+    state = RunState(settings=settings, run="r1")
+    crop_id: str = api_items(state, {"decision": "suggested_relabel"})["items"][0]["crop_id"]
+
+    result: dict[str, Any] = api_rejudge(state, {"crop_id": crop_id, "judge": "fake:second"})
+
+    assert result["verdict"]["judge"] == "fake:second"
+    assert result["item"]["judge"] == "fake:second"  # card shows the newest verdict
+    assert jsonl.read(reviewed.units)[-1]["source"] == "ui"
+    assert jsonl.read(reviewed.review_log)[-1]["scope"] == {"source": "ui", "crop_id": crop_id}
+    assert "fake:second" in api_meta(state)["judges"]
+    # Two judges named the same brand: the suggestion becomes a relabel.
+    decisions: pl.DataFrame = resolve_run(settings, "r1", judge=None, min_confidence="low")
+    row: dict[str, Any] = decisions.filter(pl.col("crop_id") == crop_id).row(0, named=True)
+    assert (row["decision"], row["brand_after"]) == ("relabel", "toyota")
+
+
+def test_second_opinion_errors_are_reported(
+    settings: GallerySettings, reviewed: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = RunState(settings=settings, run="r1")
+    crop_id: str = state.items["crop_id"][0]
+    judged_before: int = len(jsonl.read(reviewed.judgements))
+
+    def denied(_messages: list[BaseMessage]) -> Any:
+        raise RuntimeError("401 signature expired")
+
+    monkeypatch.setattr(review, "build_chain", lambda **_: RunnableLambda(denied))
+    with pytest.raises(ValueError, match="401 signature expired"):
+        api_rejudge(state, {"crop_id": crop_id, "judge": "fake:broken"})
+    monkeypatch.setattr(review, "build_chain", llm.build_chain)
+    with pytest.raises(ValueError, match="not supported"):
+        api_rejudge(state, {"crop_id": crop_id, "judge": "nope:model"})
+    with pytest.raises(ValueError, match="unknown crop_id"):
+        api_rejudge(state, {"crop_id": "missing", "judge": "fake:second"})
+
+    assert len(jsonl.read(reviewed.judgements)) == judged_before

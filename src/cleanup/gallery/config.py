@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from cleanup.llm import Effort
@@ -80,6 +81,19 @@ class GallerySettings(BaseSettings):
     review_workers: int = 4
     # Extra judge calls for a unit whose answer does not match the schema (0 = no retry).
     judge_retries: int = 2
+    # How often the UI polls review progress and spend, in seconds.
+    ui_refresh_seconds: int = Field(default=10, ge=1)
+    # Judges offered for a per-crop second opinion in the UI (any judge spec can be typed too).
+    # Env: CLEANUP_GALLERY_UI_JUDGES='["bedrock-converse:...", "ollama:..."]'
+    ui_judges: list[str] = Field(
+        default_factory=lambda: [
+            "bedrock-converse:global.anthropic.claude-haiku-5-5",
+            "bedrock-converse:qwen.qwen3-vl-235b-a22b",
+            "bedrock-converse:global.anthropic.claude-sonnet-5-5",
+            "claude:claude-opus-5-5",
+            "ollama:qwen2.5vl:7b",
+        ]
+    )
 
     @property
     def audit_root(self) -> Path:
@@ -151,6 +165,16 @@ class RunPaths:
     def review_log(self) -> Path:
         """Append-only log of review invocations: judge, scope, units, token usage."""
         return self.root / "review_log.jsonl"
+
+    @property
+    def progress(self) -> Path:
+        """Live state of the current or last `review` invocation (rewritten, not appended)."""
+        return self.root / "review_progress.json"
+
+    @property
+    def review_queue(self) -> Path:
+        """Crop ids the current or last `review` set out to judge (written once at its start)."""
+        return self.root / "review_queue.json"
 
     @property
     def montages(self) -> Path:

@@ -29,12 +29,11 @@ court or field lines, plain or blank boards, empty LED panels, kit without any m
 shirt numbers, player names, scores and clocks, generic words or signs ("EXIT", \
 "GATE 5"), patterns and textures.
 2. Can you tell which brand it is, with certainty, from this crop's own pixels?
-   If NO -> unrecognisable. Use it when a brand mark is present but too blurry, small, \
-dark, cropped, occluded or angled to identify; when only a few letters are legible and \
-they fit several brands; or when the mark is clearly not the labelled brand but you \
+   If NO -> unrecognisable. Use it when a brand mark is present small or \
+the letters could fit several brands; or when the mark is clearly not the labelled brand but you \
 cannot name the brand it is. Never guess a brand: unrecognisable is the safe answer.
 3. Which brand is it?
-   - The labelled brand (any of its logo variants, even partly visible) -> brand_match.
+   - The labelled brand (any of its logo variants, even partly visible or hindered) -> brand_match.
    - Another brand you can name with certainty -> different_brand, with that brand in \
 suggested_brand (target-list spelling below when the brand is on it, otherwise its plain \
 name).

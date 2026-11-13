@@ -1,233 +1,543 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Gallery Audit</title>
-<style>
-  :root {
-    --bg: #f6f6f4; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6b66; --line: #deded9;
-    --accent: #2f5bd3; --ok: #1f7a3d; --warn: #a35d00; --bad: #b3261e; --info: #5b3fb8;
-    --sel: #2f5bd3;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root { --bg: #161615; --panel: #1f1f1d; --text: #ececea; --muted: #9a9a94; --line: #34342f;
-      --accent: #7c9cff; --ok: #5cc77f; --warn: #e3a44a; --bad: #ff7b72; --info: #b29cff; --sel: #7c9cff; }
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; font: 13px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--text); }
-  header { position: sticky; top: 0; z-index: 5; background: var(--panel); border-bottom: 1px solid var(--line);
-    padding: 8px 16px; display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
-  header h1 { font-size: 15px; margin: 0; }
-  .stats { color: var(--muted); }
-  .tabs button, .bar button, .bar select, .bar input { font: inherit; }
-  .tabs button { border: 0; background: none; color: var(--muted); padding: 4px 8px; cursor: pointer; }
-  .tabs button.on { color: var(--text); border-bottom: 2px solid var(--accent); }
-  .bar { padding: 8px 16px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-  .bar select, .bar input { background: var(--panel); color: var(--text); border: 1px solid var(--line);
-    border-radius: 4px; padding: 3px 6px; }
-  .bar label { color: var(--muted); display: flex; gap: 4px; align-items: center; }
-  button.act { background: var(--accent); color: #fff; border: 0; border-radius: 4px; padding: 4px 10px; cursor: pointer; }
-  button.plain { background: var(--panel); color: var(--text); border: 1px solid var(--line);
-    border-radius: 4px; padding: 3px 8px; cursor: pointer; }
-  main { padding: 0 16px 32px; }
-  .grid { display: grid; grid-template-columns: repeat(var(--cols, 6), minmax(0, 1fr)); gap: 10px; }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 8px;
-    display: flex; flex-direction: column; gap: 4px; }
-  .card.sel { outline: 2px solid var(--sel); }
-  .thumb { height: 140px; display: flex; align-items: center; justify-content: center;
-    background: repeating-conic-gradient(var(--line) 0 25%, transparent 0 50%) 0 0 / 12px 12px; border-radius: 4px; }
-  .thumb img { max-width: 100%; max-height: 140px; image-rendering: auto; }
-  .row { display: flex; gap: 6px; align-items: baseline; flex-wrap: wrap; }
-  .k { color: var(--muted); width: 46px; flex: none; }
-  .id { color: var(--muted); font-size: 11px; word-break: break-all; }
-  .chip { border-radius: 3px; padding: 0 5px; font-size: 11px; border: 1px solid currentColor; }
-  .v-brand_match, .d-keep { color: var(--ok); }
-  .v-different_brand, .d-relabel, .d-suggested_relabel { color: var(--info); }
-  .v-unrecognisable, .d-unrecognisable, .d-pending { color: var(--warn); }
-  .v-not_a_logo, .d-not_a_logo, .d-drop_from_gallery, .hard { color: var(--bad); }
-  .soft { color: var(--muted); }
-  .btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
-  .btns button { flex: 1 1 auto; font-size: 14px; padding: 8px 10px; min-height: 36px; }
-  .btns button[data-h] { flex: 0 0 auto; }
-  .text { color: var(--muted); font-style: italic; }
-  table { border-collapse: collapse; width: 100%; background: var(--panel); }
-  th, td { border-bottom: 1px solid var(--line); padding: 4px 8px; text-align: left; vertical-align: top; }
-  th { position: sticky; top: 49px; background: var(--panel); cursor: pointer; }
-  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .pos { color: var(--ok); } .neg { color: var(--bad); }
-  dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px;
-    max-width: min(960px, 94vw); width: 100%; }
-  dialog img { max-width: 100%; }
-  .help { color: var(--muted); font-size: 12px; }
-  .hidden { display: none; }
-  .err { color: var(--bad); }
-</style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gallery Audit</title>
+  <style>
+    :root {
+      --bg: #f6f6f4;
+      --panel: #ffffff;
+      --text: #1d1d1b;
+      --muted: #6b6b66;
+      --line: #deded9;
+      --accent: #2f5bd3;
+      --ok: #1f7a3d;
+      --warn: #a35d00;
+      --bad: #b3261e;
+      --info: #5b3fb8;
+      --sel: #2f5bd3;
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #161615;
+        --panel: #1f1f1d;
+        --text: #ececea;
+        --muted: #9a9a94;
+        --line: #34342f;
+        --accent: #7c9cff;
+        --ok: #5cc77f;
+        --warn: #e3a44a;
+        --bad: #ff7b72;
+        --info: #b29cff;
+        --sel: #7c9cff;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font: 13px/1.4 system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 5;
+      background: var(--panel);
+      border-bottom: 1px solid var(--line);
+      padding: 8px 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 16px;
+      align-items: center;
+    }
+
+    header h1 {
+      font-size: 15px;
+      margin: 0;
+    }
+
+    .stats {
+      color: var(--muted);
+    }
+
+    .tabs button,
+    .bar button,
+    .bar select,
+    .bar input {
+      font: inherit;
+    }
+
+    .tabs button {
+      border: 0;
+      background: none;
+      color: var(--muted);
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+
+    .tabs button.on {
+      color: var(--text);
+      border-bottom: 2px solid var(--accent);
+    }
+
+    .bar {
+      padding: 8px 16px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .bar select,
+    .bar input {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 3px 6px;
+    }
+
+    .bar label {
+      color: var(--muted);
+      display: flex;
+      gap: 4px;
+      align-items: center;
+    }
+
+    button.act {
+      background: var(--accent);
+      color: #fff;
+      border: 0;
+      border-radius: 4px;
+      padding: 4px 10px;
+      cursor: pointer;
+    }
+
+    button.plain {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 3px 8px;
+      cursor: pointer;
+    }
+
+    main {
+      padding: 0 16px 32px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(var(--cols, 6), minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    #progress { display: flex; gap: 10px; align-items: center; padding: 6px 16px; border-bottom: 1px solid var(--line); }
+    #progress.hidden { display: none; }
+    #progress progress { flex: 0 0 280px; height: 12px; accent-color: var(--accent); }
+    #progress .warn { color: var(--warn); }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .card.sel {
+      outline: 2px solid var(--sel);
+    }
+
+    .thumb {
+      height: 140px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: repeating-conic-gradient(var(--line) 0 25%, transparent 0 50%) 0 0 / 12px 12px;
+      border-radius: 4px;
+    }
+
+    .thumb img {
+      max-width: 100%;
+      max-height: 140px;
+      image-rendering: auto;
+    }
+
+    .row {
+      display: flex;
+      gap: 6px;
+      align-items: baseline;
+      flex-wrap: wrap;
+    }
+
+    .k {
+      color: var(--muted);
+      width: 46px;
+      flex: none;
+    }
+
+    .id {
+      color: var(--muted);
+      font-size: 11px;
+      word-break: break-all;
+    }
+
+    .chip {
+      border-radius: 3px;
+      padding: 0 5px;
+      font-size: 11px;
+      border: 1px solid currentColor;
+    }
+
+    .v-brand_match,
+    .d-keep {
+      color: var(--ok);
+    }
+
+    .v-different_brand,
+    .d-relabel,
+    .d-suggested_relabel {
+      color: var(--info);
+    }
+
+    .v-unrecognisable,
+    .d-unrecognisable,
+    .d-pending {
+      color: var(--warn);
+    }
+
+    .v-not_a_logo,
+    .d-not_a_logo,
+    .d-drop_from_gallery,
+    .hard {
+      color: var(--bad);
+    }
+
+    .soft {
+      color: var(--muted);
+    }
+
+    .btns {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+
+    .btns button {
+      flex: 1 1 auto;
+      font-size: 14px;
+      padding: 8px 10px;
+      min-height: 36px;
+    }
+
+    .btns button[data-h] {
+      flex: 0 0 auto;
+    }
+
+    .text {
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    table {
+      border-collapse: collapse;
+      width: 100%;
+      background: var(--panel);
+    }
+
+    th,
+    td {
+      border-bottom: 1px solid var(--line);
+      padding: 4px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      position: sticky;
+      top: 49px;
+      background: var(--panel);
+      cursor: pointer;
+    }
+
+    td.num,
+    th.num {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .pos {
+      color: var(--ok);
+    }
+
+    .neg {
+      color: var(--bad);
+    }
+
+    dialog {
+      background: var(--panel);
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      max-width: min(960px, 94vw);
+      width: 100%;
+    }
+
+    dialog img {
+      max-width: 100%;
+    }
+
+    .help {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .hidden {
+      display: none;
+    }
+
+    .err {
+      color: var(--bad);
+    }
+  </style>
 </head>
+
 <body>
-<header>
-  <h1 id="title">Gallery Audit</h1>
-  <span class="stats" id="stats"></span>
-  <span class="stats" id="spend" title="Estimated judge spend from review_log.jsonl token usage; see the Cost tab"></span>
-  <nav class="tabs">
-    <button data-tab="crops" class="on">Crops</button>
-    <button data-tab="brands">Brand changes</button>
-    <button data-tab="log">Change log</button>
-    <button data-tab="cost">Cost</button>
-  </nav>
-  <span style="flex:1"></span>
-  <label class="help">min judge confidence
-    <select id="minconf"><option>low</option><option>medium</option><option>high</option></select></label>
-  <button class="act" id="resolve" title="Recompute decisions from flags, judge and your labels">Resolve</button>
-</header>
-
-<section id="tab-crops">
-  <div class="bar" id="filters">
-    <label>brand <select id="f-brand"><option value="">all</option></select></label>
-    <label>decision <select id="f-decision"><option value="">all</option>
-      <option>keep</option><option>relabel</option><option>suggested_relabel</option><option>drop_from_gallery</option>
-      <option>unrecognisable</option><option>not_a_logo</option><option>pending</option></select></label>
-    <label>judge <select id="f-verdict"><option value="">all</option></select></label>
-    <label>flag <select id="f-flag"><option value="">all</option></select></label>
-    <label>stratum <select id="f-stratum"><option value="">all</option></select></label>
-    <label>labelled <select id="f-labelled"><option value="">all</option><option value="1">yes</option><option value="0">no</option></select></label>
-    <label><input type="checkbox" id="f-changed"> changed only</label>
-    <label><input type="checkbox" id="f-disagree"> you ≠ judge</label>
-    <button class="act" id="accept-relabels" title="Confirm the judge's suggested brand for every suggested_relabel crop matching the filters" disabled>Accept suggested relabels</button>
+  <header>
+    <h1 id="title">Gallery Audit</h1>
+    <span class="stats" id="stats"></span>
+    <span class="stats" id="spend"
+      title="Estimated judge spend from review_log.jsonl token usage; see the Cost tab"></span>
+    <nav class="tabs">
+      <button data-tab="crops" class="on">Crops</button>
+      <button data-tab="brands">Brand changes</button>
+      <button data-tab="log">Change log</button>
+      <button data-tab="cost">Cost</button>
+    </nav>
     <span style="flex:1"></span>
-    <label>columns <select id="cols"></select></label>
-    <label>rows <select id="rows"></select></label>
-    <button class="plain" id="prev">◀</button><span id="page" class="stats"></span><button class="plain" id="next">▶</button>
+    <label class="help">min judge confidence
+      <select id="minconf">
+        <option>low</option>
+        <option>medium</option>
+        <option>high</option>
+      </select></label>
+    <button class="act" id="resolve" title="Recompute decisions from flags, judge and your labels">Resolve</button>
+  </header>
+  <div id="progress" class="hidden" title="Live state of cleanup gallery review for this run (review_progress.json)">
+    <b>Review</b><progress id="progress-bar" max="1" value="0"></progress><span id="progress-text" class="stats"></span>
   </div>
-  <div class="bar help">Keys: ←/→ or j/k select · ↑/↓ row · 1 brand match · 2 different brand · 3 unrecognisable · 4 not a logo · a accept suggested relabel · 0 clear · h history · n/p page</div>
-  <main><div class="grid" id="grid"></div></main>
-</section>
 
-<section id="tab-brands" class="hidden"><main>
-  <p class="help">Per brand: crops before vs after the last resolve. relabelled_in counts crops moved to this brand from others.</p>
-  <table id="brands"></table></main></section>
+  <section id="tab-crops">
+    <div class="bar" id="filters">
+      <label>brand <select id="f-brand">
+          <option value="">all</option>
+        </select></label>
+      <label>decision <select id="f-decision">
+          <option value="">all</option>
+          <option>keep</option>
+          <option>relabel</option>
+          <option>suggested_relabel</option>
+          <option>drop_from_gallery</option>
+          <option>unrecognisable</option>
+          <option>not_a_logo</option>
+          <option>pending</option>
+        </select></label>
+      <label>judge <select id="f-verdict">
+          <option value="">all</option>
+        </select></label>
+      <label>flag <select id="f-flag">
+          <option value="">all</option>
+        </select></label>
+      <label>stratum <select id="f-stratum">
+          <option value="">all</option>
+        </select></label>
+      <label title="pending = not judged yet, or queued / being judged by the running review">review <select id="f-review">
+          <option value="">all</option>
+          <option value="pending">pending</option>
+          <option value="not_judged">not judged</option>
+          <option value="in_review">in running review</option>
+          <option value="judging">judging now</option>
+          <option value="judged">judged</option>
+        </select></label>
+      <label>labelled <select id="f-labelled">
+          <option value="">all</option>
+          <option value="1">yes</option>
+          <option value="0">no</option>
+        </select></label>
+      <label><input type="checkbox" id="f-changed"> changed only</label>
+      <label><input type="checkbox" id="f-disagree"> you ≠ judge</label>
+      <button class="act" id="accept-relabels"
+        title="Confirm the judge's suggested brand for every suggested_relabel crop matching the filters"
+        disabled>Accept suggested relabels</button>
+      <span style="flex:1"></span>
+      <label>columns <select id="cols"></select></label>
+      <label>rows <select id="rows"></select></label>
+      <button class="plain" id="prev">◀</button><span id="page" class="stats"></span><button class="plain"
+        id="next">▶</button>
+    </div>
+    <div class="bar help">Keys: ←/→ or j/k select · ↑/↓ row · 1 brand match · 2 different brand · 3 unrecognisable · 4
+      not a logo · a accept suggested relabel · r second opinion (VLM) · 0 clear · h history · n/p page</div>
+    <main>
+      <div class="grid" id="grid"></div>
+    </main>
+  </section>
 
-<section id="tab-cost" class="hidden"><main>
-  <p class="help" id="cost-summary"></p>
-  <h3>Recent review calls (this run, newest first)</h3>
-  <p class="help">One row per <code>cleanup gallery review</code> invocation; usd is estimated from its token usage.</p>
-  <table id="cost-recent"></table>
-  <h3>Reference prices (USD per 1M tokens)</h3>
-  <p class="help" id="cost-asof"></p>
-  <table id="cost-prices"></table></main></section>
+  <section id="tab-brands" class="hidden">
+    <main>
+      <p class="help">Per brand: crops before vs after the last resolve. relabelled_in counts crops moved to this brand
+        from others.</p>
+      <table id="brands"></table>
+    </main>
+  </section>
 
-<section id="tab-log" class="hidden"><main>
-  <p class="help">Every label you set, newest first (events.jsonl; nothing is overwritten).</p>
-  <table id="log"></table></main></section>
+  <section id="tab-cost" class="hidden">
+    <main>
+      <p class="help" id="cost-summary"></p>
+      <h3>Recent review calls (this run, newest first)</h3>
+      <p class="help">One row per <code>cleanup gallery review</code> invocation; usd is estimated from its token usage.
+      </p>
+      <table id="cost-recent"></table>
+      <h3>Reference prices (USD per 1M tokens)</h3>
+      <p class="help" id="cost-asof"></p>
+      <table id="cost-prices"></table>
+    </main>
+  </section>
 
-<dialog id="dlg"><div id="dlg-body"></div><p><button class="plain" onclick="dlg.close()">Close</button></p></dialog>
-<datalist id="targets"></datalist>
+  <section id="tab-log" class="hidden">
+    <main>
+      <p class="help">Every label you set, newest first (events.jsonl; nothing is overwritten).</p>
+      <table id="log"></table>
+    </main>
+  </section>
 
-<script>
-const $ = (id) => document.getElementById(id);
-const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const pref = (k, d) => { try { return Number(localStorage.getItem(k)) || d; } catch { return d; } };
-const save = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
-let COLS = pref("cols", 6), ROWS = pref("rows", 10), LIMIT = COLS * ROWS;
-let HARD = new Set();
-const KEYS = {"1": "brand_match", "2": "different_brand", "3": "unrecognisable", "4": "not_a_logo"};
-let meta = null, items = [], total = 0, offset = 0, sel = 0;
+  <dialog id="dlg">
+    <div id="dlg-body"></div>
+    <p><button class="plain" onclick="dlg.close()">Close</button></p>
+  </dialog>
+  <datalist id="targets"></datalist>
+  <datalist id="judges"></datalist>
 
-async function api(path, body) {
-  const res = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || res.statusText);
-  return data;
-}
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+    const pref = (k, d) => {try {return Number(localStorage.getItem(k)) || d;} catch {return d;} };
+    const save = (k, v) => {try {localStorage.setItem(k, v);} catch { } };
+    let COLS = pref("cols", 6), ROWS = pref("rows", 10), LIMIT = COLS * ROWS;
+    let HARD = new Set();
+    const KEYS = {"1": "brand_match", "2": "different_brand", "3": "unrecognisable", "4": "not_a_logo"};
+    let meta = null, items = [], total = 0, offset = 0, sel = 0;
 
-function fillSelect(id, values) {
-  const el = $(id);
-  for (const v of values) el.insertAdjacentHTML("beforeend", `<option>${esc(v)}</option>`);
-}
+    async function api(path, body) {
+      const res = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.statusText);
+      return data;
+    }
 
-async function loadMeta() {
-  meta = await api("/api/meta");
-  HARD = new Set(meta.hard_flags);
-  $("title").textContent = `Gallery Audit · ${meta.run}`;
-  const d = meta.summary.decisions || {};
-  $("stats").textContent = `${meta.n_crops} crops · ${meta.n_judged} judged · ${meta.n_labelled} labelled by you` +
-    (meta.has_decisions ? ` · ${Object.entries(d).map(([k, v]) => `${k} ${v}`).join(" · ")}` : " · not resolved yet");
-}
+    function fillSelect(id, values) {
+      const el = $(id);
+      for (const v of values) el.insertAdjacentHTML("beforeend", `<option>${esc(v)}</option>`);
+    }
 
-function initLayout() {
-  for (const [id, cur, max] of [["cols", COLS, 12], ["rows", ROWS, 20]]) {
-    $(id).innerHTML = Array.from({length: max}, (_, i) => `<option${i + 1 === cur ? " selected" : ""}>${i + 1}</option>`).join("");
-    $(id).onchange = () => {
-      COLS = Number($("cols").value); ROWS = Number($("rows").value); LIMIT = COLS * ROWS;
-      save("cols", COLS); save("rows", ROWS); applyLayout();
-      offset = Math.floor(offset / LIMIT) * LIMIT; loadItems();
-    };
-  }
-  applyLayout();
-}
+    async function loadMeta() {
+      meta = await api("/api/meta");
+      HARD = new Set(meta.hard_flags);
+      $("title").textContent = `Gallery Audit · ${meta.run}`;
+      const d = meta.summary.decisions || {};
+      $("stats").textContent = `${meta.n_crops} crops · ${meta.n_judged} judged · ${meta.n_labelled} labelled by you` +
+        (meta.has_decisions ? ` · ${Object.entries(d).map(([k, v]) => `${k} ${v}`).join(" · ")}` : " · not resolved yet");
+    }
 
-function applyLayout() { $("grid").style.setProperty("--cols", COLS); }
+    function initLayout() {
+      for (const [id, cur, max] of [["cols", COLS, 12], ["rows", ROWS, 20]]) {
+        $(id).innerHTML = Array.from({length: max}, (_, i) => `<option${i + 1 === cur ? " selected" : ""}>${i + 1}</option>`).join("");
+        $(id).onchange = () => {
+          COLS = Number($("cols").value); ROWS = Number($("rows").value); LIMIT = COLS * ROWS;
+          save("cols", COLS); save("rows", ROWS); applyLayout();
+          offset = Math.floor(offset / LIMIT) * LIMIT; loadItems();
+        };
+      }
+      applyLayout();
+    }
 
-async function initFilters() {
-  fillSelect("f-brand", meta.brands); fillSelect("f-verdict", meta.verdicts);
-  fillSelect("f-flag", meta.flags); fillSelect("f-stratum", meta.strata);
-  $("targets").innerHTML = meta.targets.map((t) => `<option value="${esc(t)}">`).join("");
-  for (const el of document.querySelectorAll("#filters select:not(#cols):not(#rows), #filters input"))
-    el.addEventListener("change", () => { offset = 0; loadItems(); });
-}
+    function applyLayout() {$("grid").style.setProperty("--cols", COLS);}
 
-function filters() {
-  const f = {};
-  for (const k of ["brand", "decision", "verdict", "flag", "stratum", "labelled"]) {
-    const v = $(`f-${k}`).value; if (v) f[k] = v;
-  }
-  if ($("f-changed").checked) f.changed = "1";
-  if ($("f-disagree").checked) f.disagree = "1";
-  return f;
-}
+    async function initFilters() {
+      fillSelect("f-brand", meta.brands); fillSelect("f-verdict", meta.verdicts);
+      fillSelect("f-flag", meta.flags); fillSelect("f-stratum", meta.strata);
+      $("targets").innerHTML = meta.targets.map((t) => `<option value="${esc(t)}">`).join("");
+      $("judges").innerHTML = meta.judges.map((j) => `<option value="${esc(j)}">`).join("");
+      for (const el of document.querySelectorAll("#filters select:not(#cols):not(#rows), #filters input"))
+        el.addEventListener("change", () => {offset = 0; loadItems();});
+    }
 
-function query() { return new URLSearchParams({offset, limit: LIMIT, ...filters()}); }
+    function filters() {
+      const f = {};
+      for (const k of ["brand", "decision", "verdict", "flag", "stratum", "review", "labelled"]) {
+        const v = $(`f-${k}`).value; if (v) f[k] = v;
+      }
+      if ($("f-changed").checked) f.changed = "1";
+      if ($("f-disagree").checked) f.disagree = "1";
+      return f;
+    }
 
-async function countSuggested() {
-  const btn = $("accept-relabels");
-  if (!meta?.has_decisions) { btn.disabled = true; btn.textContent = "Accept suggested relabels"; return 0; }
-  const f = filters();
-  if (f.decision && f.decision !== "suggested_relabel") { btn.disabled = true; btn.textContent = "Accept suggested relabels (0)"; return 0; }
-  const {total: n} = await api(`/api/items?${new URLSearchParams({...f, decision: "suggested_relabel", offset: 0, limit: 1})}`);
-  btn.disabled = n === 0; btn.textContent = `Accept suggested relabels (${n})`;
-  return n;
-}
+    function query() {return new URLSearchParams({offset, limit: LIMIT, ...filters()});}
 
-async function loadItems() {
-  const data = await api(`/api/items?${query()}`);
-  items = data.items; total = data.total; sel = Math.min(sel, Math.max(0, items.length - 1));
-  $("page").textContent = total ? `${offset + 1}–${offset + items.length} of ${total}` : "0";
-  render();
-  countSuggested();
-}
+    async function countSuggested() {
+      const btn = $("accept-relabels");
+      if (!meta?.has_decisions) {btn.disabled = true; btn.textContent = "Accept suggested relabels"; return 0;}
+      const f = filters();
+      if (f.decision && f.decision !== "suggested_relabel") {btn.disabled = true; btn.textContent = "Accept suggested relabels (0)"; return 0;}
+      const {total: n} = await api(`/api/items?${new URLSearchParams({...f, decision: "suggested_relabel", offset: 0, limit: 1})}`);
+      btn.disabled = n === 0; btn.textContent = `Accept suggested relabels (${n})`;
+      return n;
+    }
 
-function chip(cls, text, title = "") { return `<span class="chip ${cls}" title="${esc(title)}">${esc(text)}</span>`; }
+    async function loadItems() {
+      const data = await api(`/api/items?${query()}`);
+      items = data.items; total = data.total; sel = Math.min(sel, Math.max(0, items.length - 1));
+      $("page").textContent = total ? `${offset + 1}–${offset + items.length} of ${total}` : "0";
+      render();
+      countSuggested();
+    }
 
-function card(it, i) {
-  const judge = it.judge_verdict
-    ? chip(`v-${it.judge_verdict}`, it.judge_verdict.replace(/_/g, " ") + (it.judge_suggested_brand ? `: ${it.judge_suggested_brand}` : ""), it.judge) +
-      ` <span class="stats">${esc(it.judge_confidence || "")}</span>`
-    : `<span class="stats">not judged</span>`;
-  const after = it.decision
-    ? chip(`d-${it.decision}`, it.decision.replace(/_/g, " ")) + (it.brand_after && it.decision !== "keep" ? ` → <b>${esc(it.brand_after)}</b>` : "") +
-      (it.decision === "suggested_relabel" && it.relabel_target ? ` → <i>${esc(it.relabel_target)}?</i>` : "") +
-      ` <span class="stats" title="${esc(it.reason)}">${esc(it.decided_by || "")}</span>`
-    : `<span class="stats">—</span>`;
-  const you = it.human
-    ? chip(`v-${it.human.verdict}`, it.human.verdict.replace(/_/g, " ") + (it.human.suggested_brand ? `: ${it.human.suggested_brand}` : ""), it.human.ts)
-    : `<span class="stats">—</span>`;
-  const flags = (it.flags || []).map((f) => chip(HARD.has(f) ? "hard" : "soft", f)).join(" ");
-  const origin = it.origin && it.origin !== "unknown"
-    ? chip("soft", it.origin + (it.teacher_conf ? ` ${(+it.teacher_conf).toFixed(2)}` : "")) : "";
-  return `<div class="card ${i === sel ? "sel" : ""}" data-i="${i}">
+    function chip(cls, text, title = "") {return `<span class="chip ${cls}" title="${esc(title)}">${esc(text)}</span>`;}
+
+    function card(it, i) {
+      const judge = it.judge_verdict
+        ? chip(`v-${it.judge_verdict}`, it.judge_verdict.replace(/_/g, " ") + (it.judge_suggested_brand ? `: ${it.judge_suggested_brand}` : ""), it.judge) +
+        ` <span class="stats">${esc(it.judge_confidence || "")}</span>`
+        : `<span class="stats">not judged</span>`;
+      const reviewing = it.review_status === "judging" ? ` ${chip("d-pending", "judging…", "being judged by the running review")}`
+        : it.review_status === "queued" ? ` ${chip("soft", "queued", "waiting in the running review")}` : "";
+      const after = it.decision
+        ? chip(`d-${it.decision}`, it.decision.replace(/_/g, " ")) + (it.brand_after && it.decision !== "keep" ? ` → <b>${esc(it.brand_after)}</b>` : "") +
+        (it.decision === "suggested_relabel" && it.relabel_target ? ` → <i>${esc(it.relabel_target)}?</i>` : "") +
+        ` <span class="stats" title="${esc(it.reason)}">${esc(it.decided_by || "")}</span>`
+        : `<span class="stats">—</span>`;
+      const you = it.human
+        ? chip(`v-${it.human.verdict}`, it.human.verdict.replace(/_/g, " ") + (it.human.suggested_brand ? `: ${it.human.suggested_brand}` : ""), it.human.ts)
+        : `<span class="stats">—</span>`;
+      const flags = (it.flags || []).map((f) => chip(HARD.has(f) ? "hard" : "soft", f)).join(" ");
+      const origin = it.origin && it.origin !== "unknown"
+        ? chip("soft", it.origin + (it.teacher_conf ? ` ${(+it.teacher_conf).toFixed(2)}` : "")) : "";
+      return `<div class="card ${i === sel ? "sel" : ""}" data-i="${i}">
     <div class="thumb"><img loading="lazy" src="/crops/${encodeURIComponent(it.crop_id)}.jpg" alt=""></div>
     <div class="row"><span class="k">before</span><b>${esc(it.brand)}</b> ${origin}</div>
-    <div class="row"><span class="k">judge</span>${judge}</div>
+    <div class="row"><span class="k">judge</span>${judge}${reviewing}</div>
     ${it.judge_visible_text ? `<div class="row"><span class="k"></span><span class="text">“${esc(it.judge_visible_text)}”</span></div>` : ""}
     <div class="row"><span class="k">after</span>${after}</div>
     <div class="row"><span class="k">you</span>${you}</div>
@@ -235,157 +545,226 @@ function card(it, i) {
     <div class="row id">${esc(it.crop_id)} · ${it.box_w}×${it.box_h}px · agr ${(+it.knn_agreement).toFixed(1)} · knn ${esc(it.knn_pred)}</div>
     <div class="btns">
       <button class="plain" data-v="brand_match">1 match</button>
-      <button class="plain" data-v="different_brand">2 other…</button>
+      <button class="plain" data-v="different_brand">2 other</button>
       <button class="plain" data-v="unrecognisable">3 unrec.</button>
       <button class="plain" data-v="not_a_logo">4 no logo</button>
       <button class="plain" data-v="">0 clear</button>
       <button class="plain" data-h="1">h</button>
+      <button class="plain" data-r="1" title="Second opinion: judge this crop again with a model you pick">↻ VLM</button>
     </div>
     <div class="other hidden"><input list="targets" placeholder="brand shown (Enter)" style="width:100%">
       <div class="err"></div></div>
+    <div class="rejudge hidden"><div class="row"><input list="judges" placeholder="judge, e.g. bedrock-converse:..." style="flex:1">
+      <button class="act" data-run="1">Run</button></div><div class="err"></div></div>
   </div>`;
-}
+    }
 
-function render() {
-  $("grid").innerHTML = items.map(card).join("") || `<p class="stats">No crops match.</p>`;
-  for (const el of document.querySelectorAll(".card")) {
-    const i = +el.dataset.i;
-    el.addEventListener("click", (e) => {
-      sel = i; markSel();
-      const b = e.target.closest("button");
-      if (!b) return;
-      if (b.dataset.h) return history(items[i].crop_id);
-      label(i, b.dataset.v || null);
-    });
-    el.querySelector(".other input").addEventListener("keydown", (e) => {
-      e.stopPropagation();
-      if (e.key === "Enter") label(i, "different_brand", e.target.value);
-      if (e.key === "Escape") el.querySelector(".other").classList.add("hidden");
-    });
-  }
-}
+    function render() {
+      $("grid").innerHTML = items.map(card).join("") || `<p class="stats">No crops match.</p>`;
+      for (const el of document.querySelectorAll(".card")) {
+        const i = +el.dataset.i;
+        el.addEventListener("click", (e) => {
+          sel = i; markSel();
+          const b = e.target.closest("button");
+          if (!b) return;
+          if (b.dataset.h) return history(items[i].crop_id);
+          if (b.dataset.r) return openRejudge(i);
+          if (b.dataset.run) return rejudge(i);
+          label(i, b.dataset.v || null);
+        });
+        el.querySelector(".other input").addEventListener("keydown", (e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") label(i, "different_brand", e.target.value);
+          if (e.key === "Escape") el.querySelector(".other").classList.add("hidden");
+        });
+        el.querySelector(".rejudge input").addEventListener("keydown", (e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") rejudge(i);
+          if (e.key === "Escape") el.querySelector(".rejudge").classList.add("hidden");
+        });
+      }
+    }
 
-function markSel() {
-  document.querySelectorAll(".card").forEach((c) => c.classList.toggle("sel", +c.dataset.i === sel));
-  document.querySelector(".card.sel")?.scrollIntoView({block: "nearest"});
-}
+    function markSel() {
+      document.querySelectorAll(".card").forEach((c) => c.classList.toggle("sel", +c.dataset.i === sel));
+      document.querySelector(".card.sel")?.scrollIntoView({block: "nearest"});
+    }
 
-async function label(i, verdict, brand) {
-  const el = document.querySelector(`.card[data-i="${i}"]`);
-  if (verdict === "different_brand" && brand === undefined) {
-    const box = el.querySelector(".other"); box.classList.remove("hidden");
-    const input = box.querySelector("input"); input.value = items[i].judge_suggested_brand || ""; input.focus();
-    return;
-  }
-  try {
-    const ev = await api("/api/label", {crop_id: items[i].crop_id, verdict, suggested_brand: brand || ""});
-    items[i].human = ev.verdict ? ev : null;
-    if (sel < items.length - 1) sel += 1;
-    render(); markSel();
-  } catch (err) {
-    el.querySelector(".err").textContent = err.message; el.querySelector(".other").classList.remove("hidden");
-  }
-}
+    const JUDGE_KEY = "gallery.secondOpinionJudge";
 
-async function history(cropId) {
-  const h = await api(`/api/history?crop_id=${encodeURIComponent(cropId)}`);
-  const units = [...new Set(h.judgements.map((j) => j.unit_id))];
-  const rows = [
-    ...h.judgements.map((j) => ({ts: j.ts, who: j.judge, what: `${j.verdict}${j.suggested_brand ? ": " + j.suggested_brand : ""} (${j.confidence}) tile ${j.tile}`, extra: j.visible_text})),
-    ...h.events.map((e) => ({ts: e.ts, who: "you", what: `${e.verdict || "cleared"}${e.suggested_brand ? ": " + e.suggested_brand : ""}`, extra: e.previous_verdict ? `was ${e.previous_verdict}` : ""})),
-  ].sort((a, b) => a.ts.localeCompare(b.ts));
-  $("dlg-body").innerHTML = `<h3>${esc(cropId)}</h3>
+    function openRejudge(i) {
+      const box = document.querySelector(`.card[data-i="${i}"] .rejudge`);
+      box.classList.remove("hidden");
+      const input = box.querySelector("input");
+      let last = null;
+      try {last = localStorage.getItem(JUDGE_KEY);} catch {}
+      input.value = input.value || last || meta.judges.find((j) => j !== items[i].judge) || meta.default_judge;
+      input.focus(); input.select();
+    }
+
+    async function rejudge(i) {
+      const el = document.querySelector(`.card[data-i="${i}"]`);
+      const box = el.querySelector(".rejudge"), input = box.querySelector("input"), btn = box.querySelector("button");
+      const judge = input.value.trim();
+      if (!judge) {box.querySelector(".err").textContent = "pick a judge"; return;}
+      try {localStorage.setItem(JUDGE_KEY, judge);} catch {}
+      btn.disabled = true; btn.textContent = "Judging…"; box.querySelector(".err").textContent = "";
+      try {
+        const res = await api("/api/rejudge", {crop_id: items[i].crop_id, judge});
+        items[i] = res.item;
+        el.outerHTML = card(items[i], i);
+        render(); markSel(); loadSpend();
+      } catch (err) {
+        box.querySelector(".err").textContent = err.message;
+        btn.disabled = false; btn.textContent = "Run";
+      }
+    }
+
+    async function label(i, verdict, brand) {
+      const el = document.querySelector(`.card[data-i="${i}"]`);
+      if (verdict === "different_brand" && brand === undefined) {
+        const box = el.querySelector(".other"); box.classList.remove("hidden");
+        const input = box.querySelector("input"); input.value = items[i].judge_suggested_brand || ""; input.focus();
+        return;
+      }
+      try {
+        const ev = await api("/api/label", {crop_id: items[i].crop_id, verdict, suggested_brand: brand || ""});
+        items[i].human = ev.verdict ? ev : null;
+        if (sel < items.length - 1) sel += 1;
+        render(); markSel();
+      } catch (err) {
+        el.querySelector(".err").textContent = err.message; el.querySelector(".other").classList.remove("hidden");
+      }
+    }
+
+    async function history(cropId) {
+      const h = await api(`/api/history?crop_id=${encodeURIComponent(cropId)}`);
+      const units = [...new Set(h.judgements.map((j) => j.unit_id))];
+      const rows = [
+        ...h.judgements.map((j) => ({ts: j.ts, who: j.judge, what: `${j.verdict}${j.suggested_brand ? ": " + j.suggested_brand : ""} (${j.confidence}) tile ${j.tile}`, extra: j.visible_text})),
+        ...h.events.map((e) => ({ts: e.ts, who: "you", what: `${e.verdict || "cleared"}${e.suggested_brand ? ": " + e.suggested_brand : ""}`, extra: e.previous_verdict ? `was ${e.previous_verdict}` : ""})),
+      ].sort((a, b) => a.ts.localeCompare(b.ts));
+      $("dlg-body").innerHTML = `<h3>${esc(cropId)}</h3>
     <img src="/crops/${encodeURIComponent(cropId)}.jpg" style="max-height:200px">
     <table><tr><th>when</th><th>who</th><th>verdict</th><th></th></tr>
     ${rows.map((r) => `<tr><td>${esc(r.ts)}</td><td>${esc(r.who)}</td><td>${esc(r.what)}</td><td class="text">${esc(r.extra)}</td></tr>`).join("") || "<tr><td colspan=4>no history</td></tr>"}</table>
     ${units.map((u) => `<h4>What the judge saw (${esc(u)})</h4>
       <img src="/montages/${encodeURIComponent(u)}_refs.jpg" onerror="this.remove()"><br>
       <img src="/montages/${encodeURIComponent(u)}.jpg">`).join("")}`;
-  $("dlg").showModal();
-}
+      $("dlg").showModal();
+    }
 
-function table(el, rows, cols) {
-  let sortKey = null, asc = true;
-  const draw = () => {
-    const sorted = sortKey ? [...rows].sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : -1) * (asc ? 1 : -1)) : rows;
-    el.innerHTML = `<tr>${cols.map((c) => `<th data-k="${c}" class="${typeof rows[0]?.[c] === "number" ? "num" : ""}">${c}</th>`).join("")}</tr>` +
-      sorted.map((r) => `<tr>${cols.map((c) => {
-        const v = r[c]; const n = typeof v === "number";
-        const cls = n ? `num ${c === "delta" ? (v > 0 ? "pos" : v < 0 ? "neg" : "") : ""}` : "";
-        return `<td class="${cls}">${esc(v)}</td>`;
-      }).join("")}</tr>`).join("");
-    el.querySelectorAll("th").forEach((th) => th.onclick = () => { asc = sortKey === th.dataset.k ? !asc : true; sortKey = th.dataset.k; draw(); });
-  };
-  draw();
-}
+    function table(el, rows, cols) {
+      let sortKey = null, asc = true;
+      const draw = () => {
+        const sorted = sortKey ? [...rows].sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : -1) * (asc ? 1 : -1)) : rows;
+        el.innerHTML = `<tr>${cols.map((c) => `<th data-k="${c}" class="${typeof rows[0]?.[c] === "number" ? "num" : ""}">${c}</th>`).join("")}</tr>` +
+          sorted.map((r) => `<tr>${cols.map((c) => {
+            const v = r[c]; const n = typeof v === "number";
+            const cls = n ? `num ${c === "delta" ? (v > 0 ? "pos" : v < 0 ? "neg" : "") : ""}` : "";
+            return `<td class="${cls}">${esc(v)}</td>`;
+          }).join("")}</tr>`).join("");
+        el.querySelectorAll("th").forEach((th) => th.onclick = () => {asc = sortKey === th.dataset.k ? !asc : true; sortKey = th.dataset.k; draw();});
+      };
+      draw();
+    }
 
-const usd = (v, digits = 2) => v === null || v === undefined ? "n/a" : `$${v.toFixed(v < 1 && digits === 2 ? 4 : digits)}`;
+    const usd = (v, digits = 2) => v === null || v === undefined ? "n/a" : `$${v.toFixed(v < 1 && digits === 2 ? 4 : digits)}`;
 
-async function loadSpend() {
-  const s = await api("/api/spend");
-  $("spend").textContent = `· ≈ ${usd(s.run_usd)} spent (run) · ${usd(s.all_usd)} (all runs)` +
-    (s.recent[0]?.usd_per_request != null ? ` · last ${usd(s.recent[0].usd_per_request, 5)}/call` : "");
-  return s;
-}
+    async function loadSpend() {
+      const s = await api("/api/spend");
+      $("spend").textContent = `· ≈ ${usd(s.run_usd)} spent (run) · ${usd(s.all_usd)} (all runs)` +
+        (s.recent[0]?.usd_per_request != null ? ` · last ${usd(s.recent[0].usd_per_request, 5)}/call` : "");
+      return s;
+    }
 
-async function showTab(name) {
-  document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
-  for (const t of ["crops", "brands", "log", "cost"]) $(`tab-${t}`).classList.toggle("hidden", t !== name);
-  if (name === "cost") {
-    const s = await loadSpend();
-    $("cost-summary").textContent = `This run ≈ ${usd(s.run_usd)} · all runs of this gallery ≈ ${usd(s.all_usd)}` +
-      (s.unpriced_judges.length ? ` · not priced (excluded): ${s.unpriced_judges.join(", ")}` : "");
-    const recent = s.recent.map((r) => ({...r, usd: usd(r.usd), usd_per_request: usd(r.usd_per_request, 5)}));
-    if (!recent.length) $("cost-recent").innerHTML = "<tr><td>No review calls in this run yet.</td></tr>";
-    else table($("cost-recent"), recent, ["ts", "judge", "units", "crops", "requests", "input_tokens", "cache_read", "cache_write", "output_tokens", "usd", "usd_per_request"]);
-    $("cost-asof").textContent = `Snapshot from ${s.prices_as_of}, standard tier, prompts under 100K tokens. ` +
-      "Cache write is the 5-minute rate. ollama: free. Prices drift: check AWS / Anthropic pricing before relying on totals.";
-    table($("cost-prices"), s.prices, ["judge", "input", "output", "cache_read", "cache_write", "source"]);
-  }
-  if (name === "brands") {
-    const rows = await api("/api/brand_changes");
-    if (!rows.length) { $("brands").innerHTML = "<tr><td>Run Resolve first.</td></tr>"; return; }
-    table($("brands"), rows, ["brand", "before", "kept", "relabelled_out", "relabelled_in", "removed", "pending", "after", "delta"]);
-  }
-  if (name === "log") {
-    const rows = await api("/api/changes");
-    if (!rows.length) { $("log").innerHTML = "<tr><td>No labels yet.</td></tr>"; return; }
-    table($("log"), rows, ["ts", "crop_id", "brand", "previous_verdict", "verdict", "suggested_brand", "judge_verdict", "note"]);
-  }
-}
+    const duration = (s) => s < 90 ? `${Math.round(s)}s` : s < 5400 ? `${Math.round(s / 60)}m` : `${(s / 3600).toFixed(1)}h`;
+    const ago = (iso) => duration(Math.max(0, (Date.now() - Date.parse(iso)) / 1000));
+    const STALE_SECONDS = 300;
 
-document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
-$("prev").onclick = () => { if (offset > 0) { offset = Math.max(0, offset - LIMIT); loadItems(); } };
-$("next").onclick = () => { if (offset + LIMIT < total) { offset += LIMIT; loadItems(); } };
-$("accept-relabels").onclick = async () => {
-  const n = await countSuggested();
-  if (!n) return;
-  const scope = Object.keys(filters()).length ? "matching the current filters" : "in this run";
-  if (!confirm(`Accept ${n} suggested relabel(s) ${scope}?\n\nEach crop is labelled "different brand" with the judge's suggested brand (logged as "accepted (bulk)"; change any back with its buttons). Then Resolve runs.`)) return;
-  const btn = $("accept-relabels"); btn.disabled = true; btn.textContent = "Accepting…";
-  try { await api("/api/accept_relabels", {filters: filters(), min_confidence: $("minconf").value}); await loadMeta(); await loadItems(); }
-  catch (err) { alert(err.message); countSuggested(); }
-};
-$("resolve").onclick = async () => {
-  $("resolve").disabled = true; $("resolve").textContent = "Resolving…";
-  try { await api("/api/resolve", {min_confidence: $("minconf").value}); await loadMeta(); await loadItems(); }
-  finally { $("resolve").disabled = false; $("resolve").textContent = "Resolve"; }
-};
-document.addEventListener("keydown", (e) => {
-  if ($("dlg").open || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
-  if (e.key === "ArrowRight" || e.key === "j") { sel = Math.min(items.length - 1, sel + 1); markSel(); }
-  else if (e.key === "ArrowLeft" || e.key === "k") { sel = Math.max(0, sel - 1); markSel(); }
-  else if (e.key === "ArrowDown") { e.preventDefault(); sel = Math.min(items.length - 1, sel + COLS); markSel(); }
-  else if (e.key === "ArrowUp") { e.preventDefault(); sel = Math.max(0, sel - COLS); markSel(); }
-  else if (e.key === "n") $("next").click();
-  else if (e.key === "p") $("prev").click();
-  else if (e.key === "h" && items[sel]) history(items[sel].crop_id);
-  else if (e.key === "0" && items[sel]) label(sel, null);
-  else if (e.key === "a" && items[sel]?.decision === "suggested_relabel") label(sel, "different_brand", items[sel].relabel_target);
-  else if (KEYS[e.key] && items[sel]) { e.preventDefault(); label(sel, KEYS[e.key]); }
-});
+    async function loadProgress() {
+      let p;
+      try {p = await api("/api/progress");} catch {return;}
+      const box = $("progress");
+      if (p.status === "none") {box.classList.add("hidden"); return;}
+      box.classList.remove("hidden");
+      $("progress-bar").max = p.total_units || 1; $("progress-bar").value = p.done_units;
+      const pct = p.total_units ? Math.round(100 * p.done_units / p.total_units) : 100;
+      const elapsed = (Date.parse(p.updated) - Date.parse(p.started)) / 1000;
+      const eta = p.status === "running" && p.done_units ? duration(elapsed / p.done_units * (p.total_units - p.done_units)) : null;
+      const stale = p.status === "running" && (Date.now() - Date.parse(p.updated)) / 1000 > STALE_SECONDS;
+      $("progress-text").innerHTML = `${esc(p.judge)} · ${p.done_units}/${p.total_units} units (${pct}%) · ${p.done_crops}/${p.total_crops} crops` +
+        (p.errors ? ` · <span class="warn">${p.errors} errors</span>` : "") +
+        (p.status === "running" ? (eta ? ` · ETA ${eta}` : "") : ` · <b>${esc(p.status)}</b> after ${duration(elapsed)}`) +
+        ` · updated ${ago(p.updated)} ago` +
+        (stale ? ` · <span class="warn">no update for ${ago(p.updated)}: stopped or stuck?</span>` : "");
+    }
 
-(async () => { initLayout(); loadSpend(); setInterval(loadSpend, 30000); await loadMeta(); await initFilters(); await loadItems(); })();
-</script>
+    async function poll() {
+      await Promise.all([loadProgress(), loadSpend()]);
+      if ($("f-review").value && !document.querySelector(".other:not(.hidden), .rejudge:not(.hidden)")) loadItems();  // keep a review view live
+    }
+
+    async function showTab(name) {
+      document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
+      for (const t of ["crops", "brands", "log", "cost"]) $(`tab-${t}`).classList.toggle("hidden", t !== name);
+      if (name === "cost") {
+        const s = await loadSpend();
+        $("cost-summary").textContent = `This run ≈ ${usd(s.run_usd)} · all runs of this gallery ≈ ${usd(s.all_usd)}` +
+          (s.unpriced_judges.length ? ` · not priced (excluded): ${s.unpriced_judges.join(", ")}` : "");
+        const recent = s.recent.map((r) => ({...r, usd: usd(r.usd), usd_per_request: usd(r.usd_per_request, 5)}));
+        if (!recent.length) $("cost-recent").innerHTML = "<tr><td>No review calls in this run yet.</td></tr>";
+        else table($("cost-recent"), recent, ["ts", "judge", "units", "crops", "requests", "input_tokens", "cache_read", "cache_write", "output_tokens", "usd", "usd_per_request"]);
+        $("cost-asof").textContent = `Snapshot from ${s.prices_as_of}, standard tier, prompts under 100K tokens. ` +
+          "Cache write is the 5-minute rate. ollama: free. Prices drift: check AWS / Anthropic pricing before relying on totals.";
+        table($("cost-prices"), s.prices, ["judge", "input", "output", "cache_read", "cache_write", "source"]);
+      }
+      if (name === "brands") {
+        const rows = await api("/api/brand_changes");
+        if (!rows.length) {$("brands").innerHTML = "<tr><td>Run Resolve first.</td></tr>"; return;}
+        table($("brands"), rows, ["brand", "before", "kept", "relabelled_out", "relabelled_in", "removed", "pending", "after", "delta"]);
+      }
+      if (name === "log") {
+        const rows = await api("/api/changes");
+        if (!rows.length) {$("log").innerHTML = "<tr><td>No labels yet.</td></tr>"; return;}
+        table($("log"), rows, ["ts", "crop_id", "brand", "previous_verdict", "verdict", "suggested_brand", "judge_verdict", "note"]);
+      }
+    }
+
+    document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
+    $("prev").onclick = () => {if (offset > 0) {offset = Math.max(0, offset - LIMIT); loadItems();} };
+    $("next").onclick = () => {if (offset + LIMIT < total) {offset += LIMIT; loadItems();} };
+    $("accept-relabels").onclick = async () => {
+      const n = await countSuggested();
+      if (!n) return;
+      const scope = Object.keys(filters()).length ? "matching the current filters" : "in this run";
+      if (!confirm(`Accept ${n} suggested relabel(s) ${scope}?\n\nEach crop is labelled "different brand" with the judge's suggested brand (logged as "accepted (bulk)"; change any back with its buttons). Then Resolve runs.`)) return;
+      const btn = $("accept-relabels"); btn.disabled = true; btn.textContent = "Accepting…";
+      try {await api("/api/accept_relabels", {filters: filters(), min_confidence: $("minconf").value}); await loadMeta(); await loadItems();}
+      catch (err) {alert(err.message); countSuggested();}
+    };
+    $("resolve").onclick = async () => {
+      $("resolve").disabled = true; $("resolve").textContent = "Resolving…";
+      try {await api("/api/resolve", {min_confidence: $("minconf").value}); await loadMeta(); await loadItems();}
+      finally {$("resolve").disabled = false; $("resolve").textContent = "Resolve";}
+    };
+    document.addEventListener("keydown", (e) => {
+      if ($("dlg").open || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+      if (e.key === "ArrowRight" || e.key === "j") {sel = Math.min(items.length - 1, sel + 1); markSel();}
+      else if (e.key === "ArrowLeft" || e.key === "k") {sel = Math.max(0, sel - 1); markSel();}
+      else if (e.key === "ArrowDown") {e.preventDefault(); sel = Math.min(items.length - 1, sel + COLS); markSel();}
+      else if (e.key === "ArrowUp") {e.preventDefault(); sel = Math.max(0, sel - COLS); markSel();}
+      else if (e.key === "n") $("next").click();
+      else if (e.key === "p") $("prev").click();
+      else if (e.key === "h" && items[sel]) history(items[sel].crop_id);
+      else if (e.key === "r" && items[sel]) {e.preventDefault(); openRejudge(sel);}
+      else if (e.key === "0" && items[sel]) label(sel, null);
+      else if (e.key === "a" && items[sel]?.decision === "suggested_relabel") label(sel, "different_brand", items[sel].relabel_target);
+      else if (KEYS[e.key] && items[sel]) {e.preventDefault(); label(sel, KEYS[e.key]);}
+    });
+
+    (async () => {initLayout(); await loadMeta(); poll(); setInterval(poll, 1000 * (meta.refresh_seconds || 10)); await initFilters(); await loadItems();})();
+  </script>
 </body>
+
 </html>

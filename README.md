@@ -158,6 +158,22 @@ not match the schema (e.g. a tile label in `cluster_verdict`) is retried up to
 `CLEANUP_GALLERY_JUDGE_RETRIES` times (default 2, logged as `unit_retry`, each retry billed);
 auth errors, unknown models and refusals are not retried.
 
+**Progress.** While `review` runs it rewrites `review_progress.json` in the run dir (units and
+crops done, errors, status). The UI shows it as a bar under the header with an ETA, and marks
+it stopped or stale if the review was interrupted. The **review** filter shows `pending` crops
+(not judged yet, or queued / being judged by the running review), or narrows to `not judged`,
+`in running review`, `judging now` or `judged`; cards show *queued* / *judging…* chips and the
+grid refreshes with the progress bar while this filter is on. `review` writes the crop ids it
+will judge to `review_queue.json` once at its start. The UI polls progress and spend every
+`CLEANUP_GALLERY_UI_REFRESH_SECONDS` (default 10).
+
+**Second opinion.** Each card has a **↻ VLM** button (key `r`): pick any judge spec (offered:
+`CLEANUP_GALLERY_UI_JUDGES` plus judges already used in the run) and that model judges the one
+crop now, with the same sheet, prompt and retries as `review`. The verdict is appended to
+`judgements.jsonl` (newest wins, so the card shows it) and the call to `units.jsonl` /
+`review_log.jsonl` (counted in spend). A second judge naming the same brand as the first turns
+a `suggested_relabel` into a `relabel` at the next Resolve.
+
 **Cost.** The UI header shows the estimated judge spend for the run and for all runs of the
 gallery, plus the cost of the last call; the Cost tab lists recent `review` invocations and the
 reference prices (USD per 1M tokens). Estimates come from token usage in `review_log.jsonl` and

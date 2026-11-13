@@ -6,6 +6,7 @@ run's events.jsonl (never rewritten), so the full history of every crop stays vi
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,7 @@ from cleanup.gallery.config import GallerySettings, RunPaths
 from cleanup.gallery.judge import TILE_LABELS
 from cleanup.gallery.pricing import spend_report
 from cleanup.gallery.resolve import resolve_run
+from cleanup.gallery.review import judge_one
 from cleanup.gallery.run import load_run
 
 log = structlog.get_logger()
@@ -67,6 +69,8 @@ class RunState:
     paths: RunPaths = field(init=False)
     items: pl.DataFrame = field(init=False)
     targets: list[str] = field(init=False)
+    # (file, mtime_ns, size) -> parsed content, so polling large runs stays cheap.
+    file_cache: dict[tuple[str, int, int], Any] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         """Load the run's tables."""
@@ -107,8 +111,70 @@ def latest_judgements(paths: RunPaths) -> pl.DataFrame:
     return pl.DataFrame(rows, schema=schema)
 
 
+@dataclass(frozen=True)
+class ReviewActivity:
+    """Crops the running `review` has not finished: queued or being judged right now."""
+
+    in_review: frozenset[str] = frozenset()
+    judging: frozenset[str] = frozenset()
+
+    def status(self, crop_id: str) -> str | None:
+        """'judging', 'queued' or None (not part of a running review)."""
+        if crop_id in self.judging:
+            return "judging"
+        return "queued" if crop_id in self.in_review else None
+
+
+NO_ACTIVITY = ReviewActivity()
+
+
+def review_activity(state: "RunState") -> ReviewActivity:
+    """What the running review still has to do; empty when no review is running."""
+    paths: RunPaths = state.paths
+    if not paths.progress.exists() or not paths.review_queue.exists():
+        return NO_ACTIVITY
+    progress: dict[str, Any] = json.loads(paths.progress.read_text())
+    if progress.get("status") != "running":
+        return NO_ACTIVITY
+    queue: dict[str, Any] = cached(state, paths.review_queue, lambda p: json.loads(p.read_text()))
+    if queue.get("started") != progress["started"]:
+        return NO_ACTIVITY  # queue of an older review
+    offset: int = queue.get("units_offset", 0)
+    finished: set[str] = {
+        crop_id
+        for row in cached(state, paths.units, lambda p: read_from(p, offset), tag=str(offset))
+        if row["judge"] == progress["judge"]
+        for crop_id in row.get("crop_ids", [])
+    }
+    judging: frozenset[str] = frozenset(c for ids in progress["judging"].values() for c in ids)
+    return ReviewActivity(
+        in_review=frozenset(set(queue["crop_ids"]) - finished) | judging, judging=judging
+    )
+
+
+def read_from(path: Path, offset: int) -> list[dict[str, Any]]:
+    """JSONL rows written after byte `offset` (this review's rows)."""
+    with path.open("rb") as f:
+        f.seek(offset)
+        return [json.loads(line) for line in f.read().decode().splitlines() if line.strip()]
+
+
+def cached(state: "RunState", path: Path, load: Callable[[Path], Any], tag: str = "") -> Any:
+    """`load(path)`, reused until the file changes (`tag` separates different loads of it)."""
+    stat = path.stat() if path.exists() else None
+    name: str = f"{path}#{tag}"
+    key: tuple[str, int, int] = (name, stat.st_mtime_ns if stat else 0, stat.st_size if stat else 0)
+    if key not in state.file_cache:
+        state.file_cache = {k: v for k, v in state.file_cache.items() if k[0] != name}
+        state.file_cache[key] = load(path) if stat else []
+    return state.file_cache[key]
+
+
 def filter_items(
-    items: pl.DataFrame, human: dict[str, dict[str, Any]], query: dict[str, str]
+    items: pl.DataFrame,
+    human: dict[str, dict[str, Any]],
+    query: dict[str, str],
+    activity: ReviewActivity = NO_ACTIVITY,
 ) -> pl.DataFrame:
     """Apply the UI's filters (all optional)."""
     out: pl.DataFrame = items
@@ -131,12 +197,32 @@ def filter_items(
         out = out.filter(pl.col("crop_id").is_in(labelled))
     if query.get("labelled") == "0":
         out = out.filter(~pl.col("crop_id").is_in(labelled))
+    if review := query.get("review"):
+        out = out.filter(review_filter(review, activity))
     if query.get("disagree") == "1":
         human_verdict: pl.Expr = pl.col("crop_id").replace_strict(
             {c: h["verdict"] for c, h in human.items()}, default=None, return_dtype=pl.String
         )
         out = out.filter(human_verdict.is_not_null() & (human_verdict != pl.col("judge_verdict")))
     return out
+
+
+def review_filter(review: str, activity: ReviewActivity) -> pl.Expr:
+    """pending = not judged yet or still in the running review; the rest as named."""
+    not_judged: pl.Expr = pl.col("judge_verdict").is_null()
+    in_review: pl.Expr = pl.col("crop_id").is_in(list(activity.in_review))
+    match review:
+        case "pending":
+            return not_judged | in_review
+        case "not_judged":
+            return not_judged & ~in_review
+        case "in_review":
+            return in_review
+        case "judging":
+            return pl.col("crop_id").is_in(list(activity.judging))
+        case "judged":
+            return ~not_judged & ~in_review
+    raise ValueError(f"unknown review filter {review!r}")
 
 
 def make_handler(state: RunState) -> type[BaseHTTPRequestHandler]:
@@ -158,6 +244,7 @@ def make_handler(state: RunState) -> type[BaseHTTPRequestHandler]:
                 "/api/changes": lambda: api_changes(state),
                 "/api/brand_changes": lambda: api_brand_changes(state),
                 "/api/spend": lambda: api_spend(state),
+                "/api/progress": lambda: api_progress(state),
             }
             if url.path in routes:
                 return self.send_json(routes[url.path]())
@@ -181,6 +268,8 @@ def make_handler(state: RunState) -> type[BaseHTTPRequestHandler]:
                     return self.send_json(api_label(state, body))
                 if path == "/api/accept_relabels":
                     return self.send_json(api_accept_relabels(state, body))
+                if path == "/api/rejudge":
+                    return self.send_json(api_rejudge(state, body))
                 if path == "/api/resolve":
                     return self.send_json(api_resolve(state, body))
             except ValueError as exc:
@@ -248,20 +337,28 @@ def api_meta(state: RunState) -> dict[str, Any]:
         "verdicts": list(TILE_LABELS),
         "hard_flags": list(state.settings.hard_flags),
         "targets": state.targets,
+        "refresh_seconds": state.settings.ui_refresh_seconds,
+        "judges": judge_choices(state),
+        "default_judge": state.settings.judge,
     }
 
 
 def api_items(state: RunState, query: dict[str, str]) -> dict[str, Any]:
     """One page of filtered crops, each with its latest human label."""
     human: dict[str, dict[str, Any]] = human_labels(state)
-    filtered: pl.DataFrame = filter_items(state.items, human, query)
+    activity: ReviewActivity = review_activity(state)
+    filtered: pl.DataFrame = filter_items(state.items, human, query, activity)
     offset: int = max(0, int(query.get("offset", 0)))
     limit: int = min(MAX_PAGE_SIZE, int(query.get("limit", DEFAULT_PAGE_SIZE)))
     page_rows: list[dict[str, Any]] = filtered.slice(offset, limit).to_dicts()
     return {
         "total": filtered.height,
         "offset": offset,
-        "items": [row | {"human": human.get(row["crop_id"])} for row in page_rows],
+        "items": [
+            row
+            | {"human": human.get(row["crop_id"]), "review_status": activity.status(row["crop_id"])}
+            for row in page_rows
+        ],
     }
 
 
@@ -283,6 +380,13 @@ def api_brand_changes(state: RunState) -> list[dict[str, Any]]:
     if not state.paths.brand_changes.exists():
         return []
     return pl.read_csv(state.paths.brand_changes).to_dicts()
+
+
+def api_progress(state: RunState) -> dict[str, Any]:
+    """Live progress of the current or last `review` of this run ({"status": "none"} if never)."""
+    if not state.paths.progress.exists():
+        return {"status": "none"}
+    return json.loads(state.paths.progress.read_text())
 
 
 def api_spend(state: RunState) -> dict[str, Any]:
@@ -342,6 +446,29 @@ def api_accept_relabels(state: RunState, body: dict[str, Any]) -> dict[str, Any]
         )
     summary: dict[str, Any] = api_resolve(state, body)
     return {"accepted": candidates.height, "summary": summary}
+
+
+def judge_choices(state: RunState) -> list[str]:
+    """Judges offered for a second opinion: configured ones, then any already used in the run."""
+    used: list[str] = sorted({r["judge"] for r in jsonl.read(state.paths.judgements)})
+    return list(dict.fromkeys([*state.settings.ui_judges, state.settings.judge, *used]))
+
+
+def api_rejudge(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
+    """Ask `judge` about one crop now (second opinion); reload so the card shows the verdict."""
+    crop_id: str = str(body.get("crop_id", ""))
+    judge: str = str(body.get("judge") or "").strip()
+    if not judge:
+        raise ValueError("pick a judge")
+    try:
+        verdict: dict[str, Any] = judge_one(state.settings, state.run, crop_id, judge)
+    except ValueError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - report setup errors (missing package, auth) to the UI
+        raise ValueError(f"{judge}: {exc!r}") from exc
+    state.reload()
+    item: dict[str, Any] = state.items.filter(pl.col("crop_id") == crop_id).row(0, named=True)
+    return {"verdict": verdict, "item": item | {"human": human_labels(state).get(crop_id)}}
 
 
 def api_resolve(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
