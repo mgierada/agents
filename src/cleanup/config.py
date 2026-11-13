@@ -35,7 +35,8 @@ class Settings(BaseSettings):
     # DEBUG also logs every judge decision with its reason.
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
-    # VLM judge spec: claude:<model> | bedrock:<model> | openai:<model> | ollama:<model>.
+    # VLM judge spec: <provider>:<model>,
+    # provider = claude | bedrock | bedrock-converse | openai | ollama.
     # None disables it.
     judge_model: str | None = None
     # Claude only: output_config.effort.

@@ -40,7 +40,7 @@ def run(
     judge_model: Annotated[
         str | None,
         typer.Option(
-            help="VLM spec: claude:<model> | bedrock:<model> | openai:<model> | ollama:<model>"
+            help="<provider>:<model>; claude | bedrock | bedrock-converse | openai | ollama"
         ),
     ] = None,
     judge_scope: Annotated[str | None, typer.Option(help="borderline | survivors")] = None,

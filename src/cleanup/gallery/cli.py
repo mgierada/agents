@@ -89,7 +89,9 @@ def review(
     run: Run,
     judge: Annotated[
         str | None,
-        typer.Option(help="claude:<model> | bedrock:<model> | openai:<model> | ollama:<model>"),
+        typer.Option(
+            help="<provider>:<model>; claude | bedrock | bedrock-converse | openai | ollama"
+        ),
     ] = None,
     effort: Annotated[str | None, typer.Option(help="Claude effort: low|medium|high")] = None,
     gallery_dir: GalleryDir = None,
@@ -137,6 +139,13 @@ def resolve(
     min_confidence: Annotated[
         str, typer.Option(help="Judge verdicts below this stay pending: low|medium|high")
     ] = "low",
+    trust_judge_relabels: Annotated[
+        bool,
+        typer.Option(
+            "--trust-judge-relabels",
+            help="Relabel on one judge's word (default: needs your OK or a second judge)",
+        ),
+    ] = False,
     gallery_dir: GalleryDir = None,
     runs_dir: RunsDir = None,
     target_list: TargetList = None,
@@ -149,7 +158,13 @@ def resolve(
         gallery_dir=gallery_dir, runs_dir=runs_dir, target_list=target_list, aliases=aliases
     )
     configure_logging()
-    resolve_run(settings, run, judge=judge, min_confidence=min_confidence)
+    resolve_run(
+        settings,
+        run,
+        judge=judge,
+        min_confidence=min_confidence,
+        trust_judge_relabels=trust_judge_relabels,
+    )
     paths = settings.run_paths(run)
     typer.echo(paths.summary.read_text())
 
@@ -169,6 +184,25 @@ def calibrate(
     configure_logging()
     report: dict[str, Any] = calibrate_run(settings, run)
     typer.echo(json.dumps(report, indent=2))
+
+
+@app.command()
+def plot(
+    run: Run,
+    gallery_dir: GalleryDir = None,
+    runs_dir: RunsDir = None,
+    target_list: TargetList = None,
+    aliases: Aliases = None,
+) -> None:
+    """Charts of calibration.json (run `calibrate` first) into <run>/plots/."""
+    from cleanup.gallery.plots import plot_run
+
+    settings: GallerySettings = settings_from(
+        gallery_dir=gallery_dir, runs_dir=runs_dir, target_list=target_list, aliases=aliases
+    )
+    configure_logging()
+    for path in plot_run(settings, run):
+        typer.echo(path)
 
 
 @app.command()

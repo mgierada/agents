@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 from cleanup.vlm import image_block
 
 TileLabel = Literal["brand_match", "different_brand", "unrecognisable", "not_a_logo"]
-ClusterLabel = Literal["consistent", "different_brand", "mixed", "unreadable"]
+ClusterLabel = Literal["consistent", "different_brand", "mixed", "unreadable", "not_a_logo"]
 Confidence = Literal["low", "medium", "high"]
 
 TILE_LABELS: tuple[str, ...] = ("brand_match", "different_brand", "unrecognisable", "not_a_logo")
@@ -19,14 +19,32 @@ SYSTEM_TEMPLATE = """You audit a logo-identification gallery. Each request shows
 crops that are all labelled as one brand. Decide, for every crop, whether it really shows \
 that brand's logo.
 
-Per crop verdict:
-- brand_match: the labelled brand's logo or wordmark is visible, even if partly occluded, \
-small or blurry, as long as it is recognisable as that brand.
-- different_brand: a recognisable logo of another brand. Name that brand in suggested_brand, \
-using the target-list spelling below when the brand is on it, otherwise its plain name.
-- unrecognisable: something logo-like, but too blurry, small, cropped or occluded to tell \
-which brand.
-- not_a_logo: no logo at all (background, person, random text, empty).
+Decide each crop with these three questions, in order:
+
+1. Does the crop show a brand mark at all? A brand mark is a designed logo, emblem, symbol \
+or stylised wordmark of a company, product, team, league or organisation, including a \
+fragment of one.
+   If NO -> not_a_logo. Typical not_a_logo crops: players, faces, crowds, sky, grass, \
+court or field lines, plain or blank boards, empty LED panels, kit without any mark, \
+shirt numbers, player names, scores and clocks, generic words or signs ("EXIT", \
+"GATE 5"), patterns and textures.
+2. Can you tell which brand it is, with certainty, from this crop's own pixels?
+   If NO -> unrecognisable. Use it when a brand mark is present but too blurry, small, \
+dark, cropped, occluded or angled to identify; when only a few letters are legible and \
+they fit several brands; or when the mark is clearly not the labelled brand but you \
+cannot name the brand it is. Never guess a brand: unrecognisable is the safe answer.
+3. Which brand is it?
+   - The labelled brand (any of its logo variants, even partly visible) -> brand_match.
+   - Another brand you can name with certainty -> different_brand, with that brand in \
+suggested_brand (target-list spelling below when the brand is on it, otherwise its plain \
+name).
+
+Quick test between the two non-brand verdicts: if this crop were perfectly sharp and \
+uncropped, would it show a brand mark? Yes -> unrecognisable. No -> not_a_logo.
+
+Confidence: high when the text is readable or the logo is unmistakable; medium when you \
+are fairly sure but some detail is missing; low otherwise. A different_brand verdict \
+below high confidence usually means the answer is unrecognisable.
 
 Rules:
 - The image has a REVIEW section with the numbered crops to judge (1, 2, ...). It may also \
@@ -37,9 +55,10 @@ into visible_text (empty if none).
 - The labelled brand can be wrong; that is what you are checking. Brands can have several \
 logo variants; a variant missing from the references can still be brand_match.
 - Different brands can share colours or shapes. Prefer text over colour when deciding.
-- cluster_verdict summarises the montage: consistent (nearly all brand_match), \
-different_brand (nearly all one other brand; name it in cluster_suggested_brand), mixed, \
-or unreadable (mostly unrecognisable).
+- cluster_verdict summarises the montage and uses its own words, not the crop verdicts: \
+consistent (nearly all brand_match), different_brand (nearly all one other brand; name it \
+in cluster_suggested_brand), unreadable (mostly unrecognisable), not_a_logo (mostly \
+not_a_logo), or mixed (anything else).
 - Return exactly one tile entry per numbered crop.
 
 Target list (brand names, one per line):

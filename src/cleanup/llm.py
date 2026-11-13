@@ -2,9 +2,17 @@
 
 A judge spec selects the backend:
     claude:<model>    Anthropic API (ANTHROPIC_API_KEY or an `ant auth login` profile)
-    bedrock:<model>   Claude on Amazon Bedrock (AWS_REGION plus AWS credentials or a Bedrock
-                      API key in AWS_BEARER_TOKEN_BEDROCK); `claude-*` ids get the `anthropic.`
-                      prefix Bedrock uses, anything else (inference profile, ARN) is passed as is
+    bedrock:<model>   Claude on Amazon Bedrock (AWS_PROFILE or AWS credentials, which need boto3,
+                      or a Bedrock API key in AWS_BEARER_TOKEN_BEDROCK; AWS_PROFILE wins over
+                      the key; region from AWS_REGION or the profile); `claude-*` ids get the
+                      `anthropic.` prefix Bedrock uses, anything else (inference profile, ARN)
+                      is passed as is. Only reaches Claude models served by Bedrock's
+                      Anthropic-compatible endpoint (Mantle); others (e.g. Haiku 5.5) need
+                      bedrock-converse with a `global.`/`us.` inference-profile id
+    bedrock-converse:<model>
+                      any Bedrock chat model with vision via the Converse API (langchain-aws),
+                      e.g. `qwen.qwen3-vl-235b-a22b` or `global.anthropic.claude-haiku-5-5`;
+                      same AWS auth and region as `bedrock:`; Claude ids get prompt caching
     openai:<model>    OpenAI (OPENAI_API_KEY; OPENAI_BASE_URL for OpenAI-compatible servers);
                       needs `uv add langchain-openai`
     ollama:<model>    local Ollama
@@ -29,18 +37,29 @@ from langchain_core.runnables import Runnable, RunnableLambda
 from langchain_ollama import ChatOllama
 from pydantic import BaseModel
 
-from cleanup.errors import UnknownProviderError
+from cleanup.errors import InvalidOutputError, UnknownProviderError
 
-Provider = Literal["claude", "bedrock", "openai", "ollama"]
+Provider = Literal["claude", "bedrock", "bedrock-converse", "openai", "ollama"]
 Effort = Literal["low", "medium", "high"]
 ImageMediaType = Literal["image/jpeg", "image/png", "image/gif", "image/webp"]
 
-PROVIDERS: tuple[Provider, ...] = ("claude", "bedrock", "openai", "ollama")
+PROVIDERS: tuple[Provider, ...] = ("claude", "bedrock", "bedrock-converse", "openai", "ollama")
 BEDROCK_MODEL_PREFIX = "anthropic."
 # Bedrock API-key env vars; without one the client signs requests with SigV4 via boto3.
 BEDROCK_API_KEY_ENV_VARS: tuple[str, ...] = ("AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_AWS_API_KEY")
 DATA_URL_PREFIX = "data:"
 CLAUDE_MAX_TOKENS = 16000
+CONVERSE_MAX_TOKENS = 8192
+# Converse prompt caching: only Claude ids get a cache point (Qwen etc. reject it).
+CONVERSE_CACHING_MARKER = "anthropic."
+CONVERSE_CACHE_POINT: dict[str, Any] = {"cachePoint": {"type": "default"}}
+# LangChain usage keys holding cache writes; langchain-aws moves them from `cache_creation`
+# to per-TTL keys when Bedrock reports a TTL breakdown.
+CACHE_WRITE_DETAILS: tuple[str, ...] = (
+    "cache_creation",
+    "ephemeral_5m_input_tokens",
+    "ephemeral_1h_input_tokens",
+)
 
 
 def parse_spec(spec: str) -> tuple[Provider, str]:
@@ -73,8 +92,14 @@ def build_chain(
                 client=bedrock_client(),
             )
         )
+    if provider == "bedrock-converse":
+        return RunnableLambda(
+            LangChainStructured(provider, structured=converse_structured(model, schema))
+        )
     if provider == "openai":
-        return RunnableLambda(OpenAIStructured(structured=openai_structured(model, schema)))
+        return RunnableLambda(
+            LangChainStructured(provider, structured=openai_structured(model, schema))
+        )
     return ChatOllama(model=model, temperature=0).with_structured_output(schema=schema)
 
 
@@ -93,24 +118,80 @@ def openai_structured(model: str, schema: type[BaseModel]) -> Runnable[list[Base
     )
 
 
+def converse_structured(model: str, schema: type[BaseModel]) -> Runnable[list[BaseMessage], Any]:
+    """ChatBedrockConverse with tool-call structured output, returning raw message and parsed model.
+
+    Uses the same profile and region resolution as `bedrock_client`. The profile is passed
+    explicitly so the zoomph-style named profile is used, not whatever the default chain finds.
+    Claude models (`anthropic.` in the id) get a prompt-cache point after the system prompt
+    and no temperature; other models get temperature 0 and no cache point, since Bedrock
+    rejects it for models without caching.
+    """
+    from langchain_aws import ChatBedrockConverse
+
+    profile: str | None = os.environ.get("AWS_PROFILE") or None
+    is_claude: bool = CONVERSE_CACHING_MARKER in model
+    chat = ChatBedrockConverse(
+        model=model,
+        credentials_profile_name=profile,
+        region_name=bedrock_region(profile),
+        temperature=None if is_claude else 0,  # current Claude models reject temperature
+        max_tokens=CONVERSE_MAX_TOKENS,
+    )
+    structured: Runnable[list[BaseMessage], Any] = chat.with_structured_output(
+        schema=schema, include_raw=True
+    )
+    if not is_claude:
+        return structured
+    return RunnableLambda(add_cache_point) | structured
+
+
+def add_cache_point(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Copy of `messages` with a Converse cache point closing each system message."""
+    return [
+        SystemMessage(content=[*text_blocks(m.content), CONVERSE_CACHE_POINT])
+        if isinstance(m, SystemMessage)
+        else m
+        for m in messages
+    ]
+
+
+def text_blocks(content: str | list[Any]) -> list[Any]:
+    """Message content as a list of content blocks."""
+    return [{"type": "text", "text": content}] if isinstance(content, str) else list(content)
+
+
 def bedrock_model_id(model: str) -> str:
     """`claude-opus-5-5` -> `anthropic.claude-opus-5-5`; other ids (profiles, ARNs) unchanged."""
     return BEDROCK_MODEL_PREFIX + model if model.startswith("claude-") else model
 
 
 def bedrock_client() -> anthropic.AnthropicBedrockMantle:
-    """Bedrock client from the environment (AWS_REGION, AWS_PROFILE / keys, or API key).
+    """Bedrock client from the environment (AWS_PROFILE, AWS keys, or a Bedrock API key).
 
-    Fails fast when SigV4 signing is needed but boto3 is missing, instead of failing on every
-    request of a run.
+    AWS_PROFILE is passed to the SDK explicitly: as an env var alone it would lose to a Bedrock
+    API key also set in the environment. The region comes from AWS_REGION / AWS_DEFAULT_REGION,
+    else from the profile's config. Fails fast when SigV4 signing is needed but boto3 is
+    missing, instead of failing on every request of a run.
     """
+    profile: str | None = os.environ.get("AWS_PROFILE") or None
     has_api_key: bool = any(os.environ.get(name) for name in BEDROCK_API_KEY_ENV_VARS)
-    if not has_api_key and importlib.util.find_spec("boto3") is None:
+    if (profile or not has_api_key) and importlib.util.find_spec("boto3") is None:
         raise RuntimeError(
-            "bedrock with AWS credentials needs boto3: `uv add 'anthropic[bedrock]'`, "
-            "or set AWS_BEARER_TOKEN_BEDROCK to a Bedrock API key"
+            "bedrock with AWS credentials or AWS_PROFILE needs boto3: "
+            "`uv add 'anthropic[bedrock]'`, or set AWS_BEARER_TOKEN_BEDROCK to a Bedrock API key"
         )
-    return anthropic.AnthropicBedrockMantle()
+    return anthropic.AnthropicBedrockMantle(aws_profile=profile, aws_region=bedrock_region(profile))
+
+
+def bedrock_region(profile: str | None) -> str | None:
+    """AWS_REGION / AWS_DEFAULT_REGION, else the profile's configured region (needs boto3)."""
+    region: str | None = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if region or profile is None:
+        return region
+    import boto3
+
+    return boto3.Session(profile_name=profile).region_name
 
 
 class UsageTally:
@@ -127,12 +208,16 @@ class UsageTally:
             self.usage.update(requests=1, **counts)
 
 
-class OpenAIStructured(UsageTally):
-    """Calls an OpenAI chat model with structured output and tallies token usage."""
+class LangChainStructured(UsageTally):
+    """Calls a LangChain chat model with structured output and tallies token usage."""
 
-    def __init__(self, structured: Runnable[list[BaseMessage], dict[str, Any]]) -> None:
-        """`structured` is a chat model's `with_structured_output(..., include_raw=True)`."""
+    def __init__(
+        self, provider: str, structured: Runnable[list[BaseMessage], dict[str, Any]]
+    ) -> None:
+        """`structured` is a chat model's `with_structured_output(..., include_raw=True)`;
+        `provider` names the backend in error messages."""
         super().__init__()
+        self.provider = provider
         self.structured = structured
 
     def __call__(self, messages: list[BaseMessage]) -> BaseModel:
@@ -140,16 +225,18 @@ class OpenAIStructured(UsageTally):
         result: dict[str, Any] = self.structured.invoke(messages)
         raw: Any = result["raw"]
         usage: dict[str, Any] = getattr(raw, "usage_metadata", None) or {}
+        details: dict[str, Any] = usage.get("input_token_details") or {}
         self.record(
             input_tokens=usage.get("input_tokens", 0),
             output_tokens=usage.get("output_tokens", 0),
-            cache_read_input_tokens=usage.get("input_token_details", {}).get("cache_read", 0),
+            cache_read_input_tokens=details.get("cache_read", 0),
+            cache_creation_input_tokens=sum(details.get(k, 0) for k in CACHE_WRITE_DETAILS),
         )
         refusal: str | None = getattr(raw, "additional_kwargs", {}).get("refusal")
         if refusal:
-            raise RuntimeError(f"openai refused: {refusal}")
+            raise RuntimeError(f"{self.provider} refused: {refusal}")
         if result["parsed"] is None:
-            raise ValueError(f"no structured output: {result.get('parsing_error')!r}")
+            raise InvalidOutputError(f"no structured output: {result.get('parsing_error')!r}")
         return result["parsed"]
 
 
@@ -186,7 +273,7 @@ class ClaudeStructured(UsageTally):
         if response.stop_reason == "refusal":
             raise RuntimeError(f"claude refused: {response.stop_details}")
         if response.parsed_output is None:
-            raise ValueError(f"no structured output, stop_reason={response.stop_reason}")
+            raise InvalidOutputError(f"no structured output, stop_reason={response.stop_reason}")
         return response.parsed_output
 
     def record_usage(self, response: ParsedMessage[Any]) -> None:

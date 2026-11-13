@@ -21,6 +21,7 @@ from cleanup.gallery import jsonl
 from cleanup.gallery.brands import load_catalog
 from cleanup.gallery.config import GallerySettings, RunPaths
 from cleanup.gallery.judge import TILE_LABELS
+from cleanup.gallery.pricing import spend_report
 from cleanup.gallery.resolve import resolve_run
 from cleanup.gallery.run import load_run
 
@@ -156,6 +157,7 @@ def make_handler(state: RunState) -> type[BaseHTTPRequestHandler]:
                 "/api/history": lambda: api_history(state, query.get("crop_id", "")),
                 "/api/changes": lambda: api_changes(state),
                 "/api/brand_changes": lambda: api_brand_changes(state),
+                "/api/spend": lambda: api_spend(state),
             }
             if url.path in routes:
                 return self.send_json(routes[url.path]())
@@ -177,6 +179,8 @@ def make_handler(state: RunState) -> type[BaseHTTPRequestHandler]:
             try:
                 if path == "/api/label":
                     return self.send_json(api_label(state, body))
+                if path == "/api/accept_relabels":
+                    return self.send_json(api_accept_relabels(state, body))
                 if path == "/api/resolve":
                     return self.send_json(api_resolve(state, body))
             except ValueError as exc:
@@ -281,6 +285,11 @@ def api_brand_changes(state: RunState) -> list[dict[str, Any]]:
     return pl.read_csv(state.paths.brand_changes).to_dicts()
 
 
+def api_spend(state: RunState) -> dict[str, Any]:
+    """Estimated judge spend: this run, all runs of the gallery, recent review calls, prices."""
+    return spend_report(state.settings.audit_root, state.run)
+
+
 def api_label(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
     """Append a human label (or clear one with verdict null); records the previous label."""
     crop_id: str = str(body.get("crop_id", ""))
@@ -309,6 +318,32 @@ def api_label(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
+def api_accept_relabels(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
+    """Confirm every `suggested_relabel` matching the UI's filters, then re-resolve.
+
+    Each acceptance is an ordinary human label (different_brand + the judge's target, note
+    `accepted (bulk)`) appended to events.jsonl, so any crop can be changed back individually.
+    """
+    if "decision" not in state.items.columns:
+        raise ValueError("run Resolve first")
+    filters: dict[str, str] = {k: str(v) for k, v in (body.get("filters") or {}).items()}
+    candidates: pl.DataFrame = filter_items(state.items, human_labels(state), filters).filter(
+        pl.col("decision") == "suggested_relabel"
+    )
+    for row in candidates.select("crop_id", "relabel_target").iter_rows(named=True):
+        api_label(
+            state,
+            {
+                "crop_id": row["crop_id"],
+                "verdict": "different_brand",
+                "suggested_brand": row["relabel_target"],
+                "note": "accepted (bulk)",
+            },
+        )
+    summary: dict[str, Any] = api_resolve(state, body)
+    return {"accepted": candidates.height, "summary": summary}
+
+
 def api_resolve(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
     """Re-run resolve (human labels included) and reload the tables."""
     resolve_run(
@@ -316,6 +351,7 @@ def api_resolve(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
         state.run,
         judge=body.get("judge") or None,
         min_confidence=body.get("min_confidence") or "low",
+        trust_judge_relabels=bool(body.get("trust_judge_relabels")),
     )
     state.reload()
     return json.loads(state.paths.summary.read_text())

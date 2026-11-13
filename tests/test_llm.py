@@ -59,6 +59,10 @@ MESSAGES: list[BaseMessage] = [
         ("claude:claude-opus-5-5", ("claude", "claude-opus-5-5")),
         ("bedrock:claude-haiku-5-5", ("bedrock", "claude-haiku-5-5")),
         ("openai:gpt-5", ("openai", "gpt-5")),
+        (
+            "bedrock-converse:qwen.qwen3-vl-235b-a22b",
+            ("bedrock-converse", "qwen.qwen3-vl-235b-a22b"),
+        ),
         ("ollama:qwen2.5vl:7b", ("ollama", "qwen2.5vl:7b")),
     ],
 )
@@ -120,6 +124,7 @@ def test_bedrock_model_id(model: str, expected: str) -> None:
 def test_build_chain_bedrock_uses_mantle_client(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AWS_REGION", "us-east-1")
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-key")
+    monkeypatch.delenv("AWS_PROFILE", raising=False)
 
     chain = build_chain("bedrock:claude-opus-5-5", JudgeVerdict)
 
@@ -138,6 +143,28 @@ def test_bedrock_without_api_key_needs_boto3(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(RuntimeError, match="boto3"):
         build_chain("bedrock:claude-opus-5-5", JudgeVerdict)
+
+
+def test_bedrock_profile_is_passed_explicitly_over_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+    monkeypatch.setenv("AWS_PROFILE", "zoomph")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-key")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: object())
+    monkeypatch.setattr(anthropic, "AnthropicBedrockMantle", lambda **kw: seen.update(kw))
+
+    llm.bedrock_client()
+
+    assert seen == {"aws_profile": "zoomph", "aws_region": "eu-west-1"}
+
+
+def test_bedrock_profile_needs_boto3_even_with_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AWS_PROFILE", "zoomph")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-key")
+    monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
+
+    with pytest.raises(RuntimeError, match="boto3"):
+        llm.bedrock_client()
 
 
 def openai_result(parsed: Any, refusal: str | None = None) -> dict[str, Any]:
@@ -160,7 +187,7 @@ def test_openai_structured_returns_parsed_and_tallies_usage() -> None:
         seen.append(messages)
         return openai_result(verdict)
 
-    judge = llm.OpenAIStructured(structured=RunnableLambda(fake))
+    judge = llm.LangChainStructured("openai", structured=RunnableLambda(fake))
 
     assert judge(MESSAGES) == verdict
     assert seen == [MESSAGES]
@@ -169,14 +196,17 @@ def test_openai_structured_returns_parsed_and_tallies_usage() -> None:
         "input_tokens": 300,
         "output_tokens": 40,
         "cache_read_input_tokens": 100,
+        "cache_creation_input_tokens": 0,
     }
 
 
 def test_openai_structured_raises_on_refusal_and_missing_output() -> None:
-    refused = llm.OpenAIStructured(
-        structured=RunnableLambda(lambda _m: openai_result(None, refusal="no"))
+    refused = llm.LangChainStructured(
+        "openai", structured=RunnableLambda(lambda _m: openai_result(None, refusal="no"))
     )
-    empty = llm.OpenAIStructured(structured=RunnableLambda(lambda _m: openai_result(None)))
+    empty = llm.LangChainStructured(
+        "openai", structured=RunnableLambda(lambda _m: openai_result(None))
+    )
 
     with pytest.raises(RuntimeError, match="refused"):
         refused(MESSAGES)
@@ -188,3 +218,70 @@ def test_openai_without_package_explains_install(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(importlib.util, "find_spec", lambda _name: None)
     with pytest.raises(RuntimeError, match="langchain-openai"):
         build_chain("openai:gpt-5", JudgeVerdict)
+
+
+class FakeConverse:
+    """Stands in for ChatBedrockConverse; records constructor args and the messages sent."""
+
+    seen: dict[str, Any] = {}
+
+    def __init__(self, **kwargs: Any) -> None:
+        FakeConverse.seen = dict(kwargs)
+
+    def with_structured_output(self, **kwargs: Any) -> RunnableLambda:
+        FakeConverse.seen["structured"] = kwargs
+        return RunnableLambda(self.respond)
+
+    def respond(self, messages: list[BaseMessage]) -> dict[str, Any]:
+        FakeConverse.seen["messages"] = messages
+        return openai_result(JudgeVerdict(keep=True, reason="ok"))
+
+
+@pytest.fixture
+def converse(monkeypatch: pytest.MonkeyPatch) -> type[FakeConverse]:
+    monkeypatch.setenv("AWS_PROFILE", "zoomph")
+    monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setattr("langchain_aws.ChatBedrockConverse", FakeConverse)
+    return FakeConverse
+
+
+def test_build_chain_bedrock_converse_uses_profile_and_region(
+    converse: type[FakeConverse],
+) -> None:
+    chain = build_chain("bedrock-converse:qwen.qwen3-vl-235b-a22b", JudgeVerdict)
+
+    assert chain.invoke(MESSAGES) == JudgeVerdict(keep=True, reason="ok")
+    seen: dict[str, Any] = converse.seen
+    assert seen["model"] == "qwen.qwen3-vl-235b-a22b"
+    assert (seen["credentials_profile_name"], seen["region_name"]) == ("zoomph", "us-east-1")
+    assert seen["structured"] == {"schema": JudgeVerdict, "include_raw": True}
+    assert seen["messages"] == MESSAGES  # no cache point: Qwen rejects it
+    assert seen["temperature"] == 0
+
+
+def test_bedrock_converse_caches_system_prompt_for_claude(converse: type[FakeConverse]) -> None:
+    chain = build_chain("bedrock-converse:global.anthropic.claude-haiku-5-5", JudgeVerdict)
+
+    chain.invoke(MESSAGES)
+
+    system, human = converse.seen["messages"]
+    assert system.content == [{"type": "text", "text": "be strict"}, llm.CONVERSE_CACHE_POINT]
+    assert human == MESSAGES[1]
+    assert converse.seen["temperature"] is None
+    assert MESSAGES[0].content == "be strict"  # input not mutated
+
+
+def test_langchain_structured_tallies_cache_writes() -> None:
+    result: dict[str, Any] = openai_result(JudgeVerdict(keep=True, reason="ok"))
+    result["raw"].usage_metadata["input_token_details"] = {
+        "cache_read": 0,
+        "cache_creation": 0,
+        "ephemeral_5m_input_tokens": 900,
+    }
+    judge = llm.LangChainStructured(
+        "bedrock-converse", structured=RunnableLambda(lambda _m: result)
+    )
+
+    judge(MESSAGES)
+
+    assert judge.usage["cache_creation_input_tokens"] == 900

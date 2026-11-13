@@ -4,10 +4,16 @@ Precedence: human label > hard flag > judge verdict > pending (no verdict yet).
 Relabels only ever target brands on the target list; a brand the judge names that is not
 on the list becomes a new-class candidate and the crop leaves the gallery. Nothing here
 invents class ids, and source files are never edited: decisions.parquet is a new artefact.
+
+A judge's different_brand verdict is trusted to take a crop out of its labelled brand, but not
+to name the new one (calibration: right brand in only ~60% of calls). Such crops become
+`suggested_relabel` (out of the gallery, target kept in `relabel_target`) and are relabelled
+only when you confirm them in the UI, when another judge named the same brand, or with
+`trust_judge_relabels`.
 """
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any, Literal
 
 import polars as pl
@@ -21,7 +27,13 @@ from cleanup.gallery.run import load_run
 log = structlog.get_logger()
 
 Decision = Literal[
-    "keep", "relabel", "drop_from_gallery", "unrecognisable", "not_a_logo", "pending"
+    "keep",
+    "relabel",
+    "suggested_relabel",
+    "drop_from_gallery",
+    "unrecognisable",
+    "not_a_logo",
+    "pending",
 ]
 CONFIDENCE_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
 # Decisions whose crop stays in the gallery (under brand_after).
@@ -37,25 +49,32 @@ SCHEMA: dict[str, type[pl.DataType]] = {
     "visible_text": pl.String,
     "confidence": pl.String,
     "new_class_candidate": pl.String,
+    "relabel_target": pl.String,
 }
 
 
 def resolve_run(
-    settings: GallerySettings, run: str, judge: str | None, min_confidence: str
+    settings: GallerySettings,
+    run: str,
+    judge: str | None,
+    min_confidence: str,
+    trust_judge_relabels: bool = False,
 ) -> pl.DataFrame:
     """Write decisions, brand changes, new-class candidates and summary for the run.
 
     `judge` picks which judge's verdicts to use (default: the most recent per crop).
-    Judge verdicts below `min_confidence` leave the crop pending.
+    Judge verdicts below `min_confidence` leave the crop pending. Every other judge's latest
+    verdict counts as a second opinion for confirming a relabel.
     """
     paths, crops = load_run(settings, run)
     catalog: BrandCatalog = load_catalog(
         settings.target_list, settings.aliases, fallback=crops["brand"].unique().to_list()
     )
+    judgements: list[dict[str, Any]] = jsonl.read(paths.judgements)
     verdicts: dict[str, dict[str, Any]] = jsonl.latest_by(
-        [r for r in jsonl.read(paths.judgements) if judge is None or r["judge"] == judge],
-        key="crop_id",
+        [r for r in judgements if judge is None or r["judge"] == judge], key="crop_id"
     )
+    opinions: dict[str, list[dict[str, Any]]] = all_opinions(judgements)
     human: dict[str, dict[str, Any]] = latest_human_labels(paths)
     rows: list[dict[str, Any]] = [
         decide(
@@ -64,6 +83,8 @@ def resolve_run(
             human=human.get(crop["crop_id"]),
             catalog=catalog,
             min_rank=CONFIDENCE_RANK[min_confidence],
+            opinions=opinions.get(crop["crop_id"], []),
+            trust_judge_relabels=trust_judge_relabels,
         )
         for crop in crops.select("crop_id", "brand", "flags", "gallery_unusable").iter_rows(
             named=True
@@ -72,6 +93,17 @@ def resolve_run(
     decisions: pl.DataFrame = pl.DataFrame(rows, schema=SCHEMA)
     write_outputs(decisions, paths, judge, min_confidence)
     return decisions
+
+
+def all_opinions(judgements: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """crop_id -> latest verdict of every judge that reviewed it."""
+    latest: dict[str, dict[str, Any]] = jsonl.latest_by(
+        [r | {"_key": f"{r['crop_id']}\x00{r['judge']}"} for r in judgements], key="_key"
+    )
+    out: dict[str, list[dict[str, Any]]] = {}
+    for row in latest.values():
+        out.setdefault(row["crop_id"], []).append(row)
+    return out
 
 
 def latest_human_labels(paths: RunPaths) -> dict[str, dict[str, Any]]:
@@ -86,25 +118,50 @@ def decide(
     human: Mapping[str, Any] | None,
     catalog: BrandCatalog,
     min_rank: int,
+    opinions: Sequence[Mapping[str, Any]] = (),
+    trust_judge_relabels: bool = False,
 ) -> dict[str, Any]:
-    """Decision for one crop (see module docstring for precedence)."""
+    """Decision for one crop (see module docstring for precedence and relabel rules)."""
     brand: str = crop["brand"]
     base: dict[str, Any] = {"crop_id": crop["crop_id"], "brand_before": brand}
     if human is not None:
-        return base | from_label(human, brand, catalog, decided_by="human")
+        return base | from_label(human, brand, catalog, decided_by="human", confirmed=True)
     if crop["gallery_unusable"]:
         reason: str = ",".join(crop["flags"])
         return base | outcome("drop_from_gallery", None, f"rule:{reason}", reason)
     if verdict is None or CONFIDENCE_RANK[verdict["confidence"]] < min_rank:
         why: str = "no verdict" if verdict is None else f"confidence {verdict['confidence']}"
         return base | outcome("pending", brand, "none", why)
-    return base | from_label(verdict, brand, catalog, decided_by=f"judge:{verdict['judge']}")
+    confirmed: bool = trust_judge_relabels or seconded(verdict, opinions, catalog)
+    return base | from_label(
+        verdict, brand, catalog, decided_by=f"judge:{verdict['judge']}", confirmed=confirmed
+    )
+
+
+def seconded(
+    verdict: Mapping[str, Any], opinions: Sequence[Mapping[str, Any]], catalog: BrandCatalog
+) -> bool:
+    """True when another judge also called different_brand and named the same target brand."""
+    target: str | None = catalog.resolve(verdict.get("suggested_brand") or "")
+    return target is not None and any(
+        o["judge"] != verdict["judge"]
+        and o["verdict"] == "different_brand"
+        and catalog.resolve(o.get("suggested_brand") or "") == target
+        for o in opinions
+    )
 
 
 def from_label(
-    label: Mapping[str, Any], brand: str, catalog: BrandCatalog, decided_by: str
+    label: Mapping[str, Any],
+    brand: str,
+    catalog: BrandCatalog,
+    decided_by: str,
+    confirmed: bool,
 ) -> dict[str, Any]:
-    """Decision from a judge verdict or human label (same vocabulary)."""
+    """Decision from a judge verdict or human label (same vocabulary).
+
+    An on-list different_brand is a `relabel` when `confirmed`, else a `suggested_relabel`.
+    """
     raw: str = label.get("suggested_brand") or ""
     details: dict[str, Any] = {
         "suggested_brand": raw or None,
@@ -121,8 +178,19 @@ def from_label(
     target: str | None = catalog.resolve(raw)
     if target == catalog.canonical(brand):
         return outcome("keep", brand, decided_by, f"suggested {raw!r} is the label") | details
+    if target is not None and confirmed:
+        return (
+            outcome("relabel", target, decided_by, f"shows {raw!r}")
+            | details
+            | {"relabel_target": target}
+        )
     if target is not None:
-        return outcome("relabel", target, decided_by, f"shows {raw!r}") | details
+        reason: str = f"shows {raw!r}; relabel needs your confirmation or a second judge"
+        return (
+            outcome("suggested_relabel", None, decided_by, reason)
+            | details
+            | {"relabel_target": target}
+        )
     return (
         outcome("drop_from_gallery", None, decided_by, f"shows {raw!r}, not on target list")
         | details
@@ -170,6 +238,7 @@ def brand_changes(decisions: pl.DataFrame) -> pl.DataFrame:
         before=pl.len(),
         kept=(pl.col("decision") == "keep").sum(),
         relabelled_out=(pl.col("decision") == "relabel").sum(),
+        suggested_out=(pl.col("decision") == "suggested_relabel").sum(),
         removed=(~pl.col("decision").is_in(IN_GALLERY)).sum(),
         pending=(pl.col("decision") == "pending").sum(),
     )

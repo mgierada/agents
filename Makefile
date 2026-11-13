@@ -7,8 +7,10 @@ SCOPE ?= borderline
 GALLERY ?= ../highfive-models/pre_processed/logo_audit_batches_1-10_17-31_with_pseudolabels__2024-11-22__distill-8baece-c0.7
 TARGETS ?= ../highfive-models/highfive_models/data_processing/target_lists/target_logos_2024-11-25.txt
 RUN ?= calib
+# JUDGE ?= bedrock-converse:qwen.qwen3-vl-235b-a22b
+JUDGE ?= bedrock-converse:global.anthropic.claude-haiku-5-5
 # JUDGE ?= ollama:qwen2.5vl:7b
-JUDGE ?= openai:gpt-6-astra
+# JUDGE ?= openai:gpt-6-astra
 # JUDGE ?= ollama:qwen3-vl:4b
 # JUDGE ?= bedrock:claude-haiku-5-5
 # JUDGE ?= claude:claude-haiku-5-5
@@ -17,7 +19,7 @@ GARGS = --gallery-dir $(GALLERY) --target-list $(TARGETS)
 
 .DEFAULT_GOAL := help
 .PHONY: help install run dry-run run-vlm ollama-serve ollama-pull graph stats lint format typecheck test check clean clean-output \
-	gallery-calib gallery-review gallery-resolve gallery-calibrate gallery-ui
+	gallery-calib gallery-review gallery-resolve gallery-calibrate gallery-plot gallery-ui
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -45,6 +47,9 @@ gallery-resolve: ## Gallery: decisions + before/after for RUN
 
 gallery-calibrate: ## Gallery: judge/flag precision vs your labels in RUN
 	uv run cleanup gallery calibrate --run $(RUN) $(GARGS)
+
+gallery-plot: ## Gallery: calibration charts (PNG) into RUN/plots/
+	uv run cleanup gallery plot --run $(RUN) $(GARGS)
 
 gallery-ui: ## Gallery: label/review UI for RUN on http://127.0.0.1:8765
 	uv run cleanup gallery ui --run $(RUN) $(GARGS)

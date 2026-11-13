@@ -43,7 +43,7 @@
   .id { color: var(--muted); font-size: 11px; word-break: break-all; }
   .chip { border-radius: 3px; padding: 0 5px; font-size: 11px; border: 1px solid currentColor; }
   .v-brand_match, .d-keep { color: var(--ok); }
-  .v-different_brand, .d-relabel { color: var(--info); }
+  .v-different_brand, .d-relabel, .d-suggested_relabel { color: var(--info); }
   .v-unrecognisable, .d-unrecognisable, .d-pending { color: var(--warn); }
   .v-not_a_logo, .d-not_a_logo, .d-drop_from_gallery, .hard { color: var(--bad); }
   .soft { color: var(--muted); }
@@ -68,10 +68,12 @@
 <header>
   <h1 id="title">Gallery Audit</h1>
   <span class="stats" id="stats"></span>
+  <span class="stats" id="spend" title="Estimated judge spend from review_log.jsonl token usage; see the Cost tab"></span>
   <nav class="tabs">
     <button data-tab="crops" class="on">Crops</button>
     <button data-tab="brands">Brand changes</button>
     <button data-tab="log">Change log</button>
+    <button data-tab="cost">Cost</button>
   </nav>
   <span style="flex:1"></span>
   <label class="help">min judge confidence
@@ -83,7 +85,7 @@
   <div class="bar" id="filters">
     <label>brand <select id="f-brand"><option value="">all</option></select></label>
     <label>decision <select id="f-decision"><option value="">all</option>
-      <option>keep</option><option>relabel</option><option>drop_from_gallery</option>
+      <option>keep</option><option>relabel</option><option>suggested_relabel</option><option>drop_from_gallery</option>
       <option>unrecognisable</option><option>not_a_logo</option><option>pending</option></select></label>
     <label>judge <select id="f-verdict"><option value="">all</option></select></label>
     <label>flag <select id="f-flag"><option value="">all</option></select></label>
@@ -91,18 +93,28 @@
     <label>labelled <select id="f-labelled"><option value="">all</option><option value="1">yes</option><option value="0">no</option></select></label>
     <label><input type="checkbox" id="f-changed"> changed only</label>
     <label><input type="checkbox" id="f-disagree"> you ≠ judge</label>
+    <button class="act" id="accept-relabels" title="Confirm the judge's suggested brand for every suggested_relabel crop matching the filters" disabled>Accept suggested relabels</button>
     <span style="flex:1"></span>
     <label>columns <select id="cols"></select></label>
     <label>rows <select id="rows"></select></label>
     <button class="plain" id="prev">◀</button><span id="page" class="stats"></span><button class="plain" id="next">▶</button>
   </div>
-  <div class="bar help">Keys: ←/→ or j/k select · ↑/↓ row · 1 brand match · 2 different brand · 3 unrecognisable · 4 not a logo · 0 clear · h history · n/p page</div>
+  <div class="bar help">Keys: ←/→ or j/k select · ↑/↓ row · 1 brand match · 2 different brand · 3 unrecognisable · 4 not a logo · a accept suggested relabel · 0 clear · h history · n/p page</div>
   <main><div class="grid" id="grid"></div></main>
 </section>
 
 <section id="tab-brands" class="hidden"><main>
   <p class="help">Per brand: crops before vs after the last resolve. relabelled_in counts crops moved to this brand from others.</p>
   <table id="brands"></table></main></section>
+
+<section id="tab-cost" class="hidden"><main>
+  <p class="help" id="cost-summary"></p>
+  <h3>Recent review calls (this run, newest first)</h3>
+  <p class="help">One row per <code>cleanup gallery review</code> invocation; usd is estimated from its token usage.</p>
+  <table id="cost-recent"></table>
+  <h3>Reference prices (USD per 1M tokens)</h3>
+  <p class="help" id="cost-asof"></p>
+  <table id="cost-prices"></table></main></section>
 
 <section id="tab-log" class="hidden"><main>
   <p class="help">Every label you set, newest first (events.jsonl; nothing is overwritten).</p>
@@ -164,14 +176,26 @@ async function initFilters() {
     el.addEventListener("change", () => { offset = 0; loadItems(); });
 }
 
-function query() {
-  const q = new URLSearchParams({offset, limit: LIMIT});
+function filters() {
+  const f = {};
   for (const k of ["brand", "decision", "verdict", "flag", "stratum", "labelled"]) {
-    const v = $(`f-${k}`).value; if (v) q.set(k, v);
+    const v = $(`f-${k}`).value; if (v) f[k] = v;
   }
-  if ($("f-changed").checked) q.set("changed", "1");
-  if ($("f-disagree").checked) q.set("disagree", "1");
-  return q;
+  if ($("f-changed").checked) f.changed = "1";
+  if ($("f-disagree").checked) f.disagree = "1";
+  return f;
+}
+
+function query() { return new URLSearchParams({offset, limit: LIMIT, ...filters()}); }
+
+async function countSuggested() {
+  const btn = $("accept-relabels");
+  if (!meta?.has_decisions) { btn.disabled = true; btn.textContent = "Accept suggested relabels"; return 0; }
+  const f = filters();
+  if (f.decision && f.decision !== "suggested_relabel") { btn.disabled = true; btn.textContent = "Accept suggested relabels (0)"; return 0; }
+  const {total: n} = await api(`/api/items?${new URLSearchParams({...f, decision: "suggested_relabel", offset: 0, limit: 1})}`);
+  btn.disabled = n === 0; btn.textContent = `Accept suggested relabels (${n})`;
+  return n;
 }
 
 async function loadItems() {
@@ -179,6 +203,7 @@ async function loadItems() {
   items = data.items; total = data.total; sel = Math.min(sel, Math.max(0, items.length - 1));
   $("page").textContent = total ? `${offset + 1}–${offset + items.length} of ${total}` : "0";
   render();
+  countSuggested();
 }
 
 function chip(cls, text, title = "") { return `<span class="chip ${cls}" title="${esc(title)}">${esc(text)}</span>`; }
@@ -190,6 +215,7 @@ function card(it, i) {
     : `<span class="stats">not judged</span>`;
   const after = it.decision
     ? chip(`d-${it.decision}`, it.decision.replace(/_/g, " ")) + (it.brand_after && it.decision !== "keep" ? ` → <b>${esc(it.brand_after)}</b>` : "") +
+      (it.decision === "suggested_relabel" && it.relabel_target ? ` → <i>${esc(it.relabel_target)}?</i>` : "") +
       ` <span class="stats" title="${esc(it.reason)}">${esc(it.decided_by || "")}</span>`
     : `<span class="stats">—</span>`;
   const you = it.human
@@ -293,9 +319,29 @@ function table(el, rows, cols) {
   draw();
 }
 
+const usd = (v, digits = 2) => v === null || v === undefined ? "n/a" : `$${v.toFixed(v < 1 && digits === 2 ? 4 : digits)}`;
+
+async function loadSpend() {
+  const s = await api("/api/spend");
+  $("spend").textContent = `· ≈ ${usd(s.run_usd)} spent (run) · ${usd(s.all_usd)} (all runs)` +
+    (s.recent[0]?.usd_per_request != null ? ` · last ${usd(s.recent[0].usd_per_request, 5)}/call` : "");
+  return s;
+}
+
 async function showTab(name) {
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("on", b.dataset.tab === name));
-  for (const t of ["crops", "brands", "log"]) $(`tab-${t}`).classList.toggle("hidden", t !== name);
+  for (const t of ["crops", "brands", "log", "cost"]) $(`tab-${t}`).classList.toggle("hidden", t !== name);
+  if (name === "cost") {
+    const s = await loadSpend();
+    $("cost-summary").textContent = `This run ≈ ${usd(s.run_usd)} · all runs of this gallery ≈ ${usd(s.all_usd)}` +
+      (s.unpriced_judges.length ? ` · not priced (excluded): ${s.unpriced_judges.join(", ")}` : "");
+    const recent = s.recent.map((r) => ({...r, usd: usd(r.usd), usd_per_request: usd(r.usd_per_request, 5)}));
+    if (!recent.length) $("cost-recent").innerHTML = "<tr><td>No review calls in this run yet.</td></tr>";
+    else table($("cost-recent"), recent, ["ts", "judge", "units", "crops", "requests", "input_tokens", "cache_read", "cache_write", "output_tokens", "usd", "usd_per_request"]);
+    $("cost-asof").textContent = `Snapshot from ${s.prices_as_of}, standard tier, prompts under 100K tokens. ` +
+      "Cache write is the 5-minute rate. ollama: free. Prices drift: check AWS / Anthropic pricing before relying on totals.";
+    table($("cost-prices"), s.prices, ["judge", "input", "output", "cache_read", "cache_write", "source"]);
+  }
   if (name === "brands") {
     const rows = await api("/api/brand_changes");
     if (!rows.length) { $("brands").innerHTML = "<tr><td>Run Resolve first.</td></tr>"; return; }
@@ -311,6 +357,15 @@ async function showTab(name) {
 document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
 $("prev").onclick = () => { if (offset > 0) { offset = Math.max(0, offset - LIMIT); loadItems(); } };
 $("next").onclick = () => { if (offset + LIMIT < total) { offset += LIMIT; loadItems(); } };
+$("accept-relabels").onclick = async () => {
+  const n = await countSuggested();
+  if (!n) return;
+  const scope = Object.keys(filters()).length ? "matching the current filters" : "in this run";
+  if (!confirm(`Accept ${n} suggested relabel(s) ${scope}?\n\nEach crop is labelled "different brand" with the judge's suggested brand (logged as "accepted (bulk)"; change any back with its buttons). Then Resolve runs.`)) return;
+  const btn = $("accept-relabels"); btn.disabled = true; btn.textContent = "Accepting…";
+  try { await api("/api/accept_relabels", {filters: filters(), min_confidence: $("minconf").value}); await loadMeta(); await loadItems(); }
+  catch (err) { alert(err.message); countSuggested(); }
+};
 $("resolve").onclick = async () => {
   $("resolve").disabled = true; $("resolve").textContent = "Resolving…";
   try { await api("/api/resolve", {min_confidence: $("minconf").value}); await loadMeta(); await loadItems(); }
@@ -326,10 +381,11 @@ document.addEventListener("keydown", (e) => {
   else if (e.key === "p") $("prev").click();
   else if (e.key === "h" && items[sel]) history(items[sel].crop_id);
   else if (e.key === "0" && items[sel]) label(sel, null);
+  else if (e.key === "a" && items[sel]?.decision === "suggested_relabel") label(sel, "different_brand", items[sel].relabel_target);
   else if (KEYS[e.key] && items[sel]) { e.preventDefault(); label(sel, KEYS[e.key]); }
 });
 
-(async () => { initLayout(); await loadMeta(); await initFilters(); await loadItems(); })();
+(async () => { initLayout(); loadSpend(); setInterval(loadSpend, 30000); await loadMeta(); await initFilters(); await loadItems(); })();
 </script>
 </body>
 </html>

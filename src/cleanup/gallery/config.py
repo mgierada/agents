@@ -78,6 +78,8 @@ class GallerySettings(BaseSettings):
     reference_min_agreement: float = 0.9
     reference_min_side_px: int = 64
     review_workers: int = 4
+    # Extra judge calls for a unit whose answer does not match the schema (0 = no retry).
+    judge_retries: int = 2
 
     @property
     def audit_root(self) -> Path:

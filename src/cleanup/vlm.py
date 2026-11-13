@@ -55,7 +55,7 @@ def vlm_judge(
     spec: str, fallback_keep: bool, max_edge: int = 1024, effort: Effort = "low"
 ) -> VlmJudge:
     """Build a VlmJudge from a judge spec: `claude:<model>`, `bedrock:<model>`,
-    `openai:<model>` or `ollama:<model>` (honours OLLAMA_HOST)."""
+    `bedrock-converse:<model>`, `openai:<model>` or `ollama:<model>` (honours OLLAMA_HOST)."""
     return VlmJudge(
         chain=build_chain(spec=spec, schema=JudgeVerdict, effort=effort),
         fallback_keep=fallback_keep,

@@ -17,11 +17,15 @@ from typing import Any
 
 import polars as pl
 import structlog
+from langchain_core.exceptions import OutputParserException
 from langchain_core.messages import BaseMessage
 from langchain_core.runnables import Runnable, RunnableLambda
 from PIL import Image
+from pydantic import ValidationError
+from tenacity import RetryCallState, Retrying, retry_if_exception_type, stop_after_attempt
 
 from cleanup.console import progress
+from cleanup.errors import InvalidOutputError
 from cleanup.gallery import jsonl
 from cleanup.gallery.brands import BrandCatalog, load_catalog
 from cleanup.gallery.config import GallerySettings, RunPaths
@@ -35,6 +39,13 @@ log = structlog.get_logger()
 NOISE_CLUSTER = -1
 UNSAFE_CHARS = re.compile(r"[^a-z0-9]+")
 MONTAGE_QUALITY = 90
+# Answers that do not match the schema; another call may well succeed. Auth errors, missing
+# models and refusals are not retried.
+RETRYABLE_ERRORS: tuple[type[Exception], ...] = (
+    InvalidOutputError,
+    ValidationError,
+    OutputParserException,
+)
 
 
 @dataclass(frozen=True)
@@ -247,6 +258,16 @@ class UnitReviewer:
         messages: list[BaseMessage] = build_messages(
             self.system, unit.brand, sheet, len(unit.crop_ids)
         )
+        retrying = Retrying(
+            retry=retry_if_exception_type(RETRYABLE_ERRORS),
+            stop=stop_after_attempt(s.judge_retries + 1),
+            before_sleep=lambda state: log_retry(unit.unit_id, state),
+            reraise=True,
+        )
+        return retrying(self.ask, messages)
+
+    def ask(self, messages: list[BaseMessage]) -> MontageVerdict:
+        """One judge call, validated against the montage schema."""
         return MontageVerdict.model_validate(self.chain.invoke(input=messages))
 
     def crop_paths(self, crop_ids: tuple[str, ...] | list[str]) -> list[Path]:
@@ -309,3 +330,9 @@ def chain_usage(chain: Runnable[list[BaseMessage], Any]) -> dict[str, int]:
     """Token usage of the run so far (Claude, Bedrock, OpenAI); empty for Ollama."""
     func: Any = chain.func if isinstance(chain, RunnableLambda) else None
     return dict(func.usage) if isinstance(func, UsageTally) else {}
+
+
+def log_retry(unit_id: str, state: RetryCallState) -> None:
+    """Log a judge retry with the error that triggered it."""
+    error: BaseException | None = state.outcome.exception() if state.outcome else None
+    log.warning("unit_retry", unit=unit_id, attempt=state.attempt_number, error=repr(error))

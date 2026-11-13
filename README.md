@@ -38,9 +38,23 @@ make check                          # lint + typecheck + tests
 
 - `claude:claude-opus-5-5`: Anthropic API, reads `ANTHROPIC_API_KEY` or an `ant auth login` profile
 - `bedrock:claude-opus-5-5`: Claude on Amazon Bedrock. `claude-*` ids get Bedrock's `anthropic.`
-  prefix; inference-profile ids (`us.anthropic...`) and ARNs are passed as is. Needs `AWS_REGION`
-  plus either a Bedrock API key in `AWS_BEARER_TOKEN_BEDROCK`, or AWS credentials (`AWS_PROFILE`,
-  keys, SSO) together with boto3 (`uv add 'anthropic[bedrock]'`). Bedrock bills at its own rates.
+  prefix; inference-profile ids (`us.anthropic...`) and ARNs are passed as is. Auth: a named
+  profile (`AWS_PROFILE=zoomph`), other AWS credentials (keys, SSO) or a Bedrock API key in
+  `AWS_BEARER_TOKEN_BEDROCK`. Profiles and credentials need boto3
+  (`uv add 'anthropic[bedrock]'`). `AWS_PROFILE` wins over the API key; the region comes from
+  `AWS_REGION`, else from the profile. Bedrock bills at its own rates.
+  Uses Bedrock's Anthropic-compatible endpoint (Mantle), which serves only some Claude models
+  (in us-east-1 on 2026-11-13: Opus 4.7, 4.8, 5, 5.5, Sonnet 5, Fable 5, Haiku 4.5). A model
+  it lacks returns 404 "model ... does not exist"; use `bedrock-converse:` for those.
+- `bedrock-converse:<model>`: any Bedrock chat model with vision via the Converse API and
+  langchain-aws, e.g. `qwen.qwen3-vl-235b-a22b` or `global.anthropic.claude-haiku-5-5`. Same
+  AWS auth and region as `bedrock:`; structured output through tool calling, temperature 0
+  (not sent to Claude, which rejects it).
+  Models that are invocable only through an inference profile (Haiku 5.5) need the profile
+  id: `global.` (cheaper) or `us.`, not the bare `anthropic.` id. Claude ids (containing
+  `anthropic.`) get a prompt-cache point after the system prompt; other models run uncached,
+  since Bedrock rejects cache points for models without caching (Qwen3-VL). Effort is not
+  sent.
 - `openai:<model>`: OpenAI chat models with vision, via langchain-openai (`uv add langchain-openai`).
   Reads `OPENAI_API_KEY`; `OPENAI_BASE_URL` points it at an OpenAI-compatible server. Uses strict
   JSON-schema output; effort/temperature are not sent, so the model's defaults apply.
@@ -85,6 +99,7 @@ VLM as judge, not an open-ended agent. Inputs are never modified; every run writ
 | 4 | `review` | `judgements.jsonl`, `units.jsonl`, `montages/`, `references.json`, `review_log.jsonl` |
 | 5 | `resolve` | `decisions.parquet`, `brand_changes.csv`, `new_class_candidates.csv`, `summary.json` |
 | 1 | `calibrate` | `calibration.json` (judge + flag precision vs your labels) |
+| 1 | `plot` | `plots/*.png`: confusion heatmaps, precision/recall, accuracy, flag precision |
 | 8 | `ui` | labels and overrides appended to `events.jsonl` |
 
 Typical loop:
@@ -138,7 +153,16 @@ of the brand (one per video, editable in `references.json`), is sent as one imag
 REFERENCE section (not judged) above a REVIEW section. The judge returns per-crop verdicts
 (`brand_match`, `different_brand`, `unrecognisable`, `not_a_logo`) with visible text, the brand
 actually shown and a confidence. The system prompt holds the target list and is
-prompt-cached. Hard-flagged crops are not sent (`--include-flagged` to override).
+prompt-cached. Hard-flagged crops are not sent (`--include-flagged` to override). An answer that does
+not match the schema (e.g. a tile label in `cluster_verdict`) is retried up to
+`CLEANUP_GALLERY_JUDGE_RETRIES` times (default 2, logged as `unit_retry`, each retry billed);
+auth errors, unknown models and refusals are not retried.
+
+**Cost.** The UI header shows the estimated judge spend for the run and for all runs of the
+gallery, plus the cost of the last call; the Cost tab lists recent `review` invocations and the
+reference prices (USD per 1M tokens). Estimates come from token usage in `review_log.jsonl` and
+the price snapshot in `src/cleanup/gallery/pricing.py`; judges missing there are shown as not
+priced. Prices drift, so check AWS / Anthropic before relying on totals.
 
 **Resolve.** Your label > hard flag > judge verdict > `pending`. A suggested brand on the target
 list is a `relabel`; one that isn't is dropped from the gallery and listed in
@@ -169,3 +193,37 @@ graph TD;
 	classDef first fill-opacity:0
 	classDef last fill:#bfb6fc
 ```
+
+
+
+  ┌─────────────────────┬─────────────────────────┬───────────────────────────────────────┬───────────────────────────┐
+  │    Per 1M tokens    │ Qwen3-VL 235B (Bedrock) │ Claude Haiku 5.5 (Bedrock, in-region) │ Haiku 5.5 (Anthropic API) │
+  ├─────────────────────┼─────────────────────────┼───────────────────────────────────────┼───────────────────────────┤
+  │ Input               │ $0.53                   │ $0.11                                 │ $0.10                     │
+  ├─────────────────────┼─────────────────────────┼───────────────────────────────────────┼───────────────────────────┤
+  │ Output              │ $2.66                   │ $0.55                                 │ $0.50                     │
+  ├─────────────────────┼─────────────────────────┼───────────────────────────────────────┼───────────────────────────┤
+  │ Cache read          │ no caching              │ $0.011                                │ $0.01                     │
+  ├─────────────────────┼─────────────────────────┼───────────────────────────────────────┼───────────────────────────┤
+  │ Cache write (5 min) │ n/a                     │ $0.1375                               │ $0.125                    │
+  ├─────────────────────┼─────────────────────────┼───────────────────────────────────────┼───────────────────────────┤
+  │ Batch               │ $0.26 in / $1.33 out    │                                       │                           │
+  └─────────────────────┴─────────────────────────┴───────────────────────────────────────┴───────────────────────────┘
+
+
+  For a run:
+
+  ┌───────────────────┬──────────┬──────────────┐
+  │                   │ Qwen3-VL │  Haiku 5.5   │
+  ├───────────────────┼──────────┼──────────────┤
+  │ calib, ~183 calls │ ≈ $1.20  │ ≈ $0.06–0.10 │
+  ├───────────────────┼──────────┼──────────────┤
+  │ Per 10k calls     │ ≈ $64    │ ≈ $3–4       │
+  └───────────────────┴──────────┴──────────────┘
+
+  Per call, using the smoke test's numbers (11,827 input tokens, 69 output tokens):
+  - Qwen: 11.8k × $0.53 + 69 × $2.66 ≈ $0.0064. You pay full price for the system prompt on every call.
+  - Haiku with a cache hit: about 10.5k cached tokens × $0.011, plus 1.3k uncached × $0.11, plus output ≈ $0.0003.
+  - Haiku with a cache miss: ≈ $0.0016. Misses happen on the first call, or after a gap of more than 5 minutes between calls.
+
+

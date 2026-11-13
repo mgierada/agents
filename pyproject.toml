@@ -9,7 +9,9 @@ requires-python = ">=3.12"
 authors = [{ name = "Maciej Gierada", email = "maciek.gierada@gmail.com" }]
 
 dependencies = [
-  "anthropic==2.5.0",
+  "anthropic[bedrock]==2.5.0",
+  "boto3==1.43.125",
+  "langchain-aws==1.9.2",
   "langchain-ollama==1.1.0",
   "langchain-openai==1.7.4",
   "langchain==1.4.6",
@@ -19,7 +21,9 @@ dependencies = [
   "polars==2.1.0",
   "pyarrow==26.0.1",
   "pydantic-settings==2.16.0",
+  "seaborn==0.13.2",
   "structlog==26.1.0",
+  "tenacity==9.2.1",
   "tqdm==4.70.1",
   "typer==0.27.3",
 ]
