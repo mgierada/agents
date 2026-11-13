@@ -58,3 +58,8 @@ def brightness_issues(value: float, min: float, max: float) -> list[str]:
     if value > max:
         return ["too_bright"]
     return []
+
+
+def contrast(gray: np.ndarray) -> float:
+    """Standard deviation of pixel intensity. Near zero means a blank, uniform image."""
+    return float(gray.std())

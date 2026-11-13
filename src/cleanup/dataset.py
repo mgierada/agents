@@ -14,7 +14,7 @@ def walk_files(root: Path) -> Iterator[Path]:
     """
     seen: set[str] = set()
     for dirpath, dirnames, filenames in os.walk(top=root, followlinks=True):
-        real: str = os.path.realpath(filename=dirpath)
+        real: str = os.path.realpath(dirpath)
         if real in seen:
             dirnames.clear()
             continue

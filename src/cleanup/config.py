@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from cleanup.llm import Effort
+
 JudgeScope = Literal["borderline", "survivors"]
 
 
@@ -33,8 +35,11 @@ class Settings(BaseSettings):
     # DEBUG also logs every judge decision with its reason.
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
-    # Ollama VLM judge. Disabled when judge_model is None.
+    # VLM judge spec: claude:<model> | bedrock:<model> | openai:<model> | ollama:<model>.
+    # None disables it.
     judge_model: str | None = None
+    # Claude only: output_config.effort.
+    judge_effort: Effort = "low"
     # "borderline": judge only gray-zone images. "survivors": also every passing image.
     judge_scope: JudgeScope = "borderline"
     # Images are downscaled to this longest edge before being sent to the VLM.

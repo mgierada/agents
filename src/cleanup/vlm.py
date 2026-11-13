@@ -6,11 +6,11 @@ from typing import Any
 import structlog
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import Runnable
-from langchain_ollama import ChatOllama
 from PIL import Image
 
 from cleanup.checks.image import open_image
 from cleanup.judge import JudgeVerdict
+from cleanup.llm import Effort, build_chain
 from cleanup.state import ImageRecord
 
 log = structlog.get_logger()
@@ -51,11 +51,13 @@ class VlmJudge:
             return JudgeVerdict(keep=self.fallback_keep, reason=f"judge_error:{type(exc).__name__}")
 
 
-def ollama_judge(model: str, fallback_keep: bool, max_edge: int = 1024) -> VlmJudge:
-    """Build a VlmJudge backed by a local Ollama model (honours OLLAMA_HOST)."""
-    vlm = ChatOllama(model=model, temperature=0)
+def vlm_judge(
+    spec: str, fallback_keep: bool, max_edge: int = 1024, effort: Effort = "low"
+) -> VlmJudge:
+    """Build a VlmJudge from a judge spec: `claude:<model>`, `bedrock:<model>`,
+    `openai:<model>` or `ollama:<model>` (honours OLLAMA_HOST)."""
     return VlmJudge(
-        chain=vlm.with_structured_output(schema=JudgeVerdict),
+        chain=build_chain(spec=spec, schema=JudgeVerdict, effort=effort),
         fallback_keep=fallback_keep,
         max_edge=max_edge,
     )
@@ -79,6 +81,19 @@ def encode_image(path: Path, max_edge: int) -> str:
     """Load an image, downscale so its longest edge is <= max_edge, return base64 JPEG."""
     image: Image.Image = open_image(path).convert(mode="RGB")
     image.thumbnail(size=(max_edge, max_edge), resample=Image.Resampling.LANCZOS)
+    return to_base64_jpeg(image)
+
+
+def to_base64_jpeg(image: Image.Image) -> str:
+    """Encode an RGB image as base64 JPEG."""
     buffer = io.BytesIO()
     image.save(fp=buffer, format="JPEG", quality=JPEG_QUALITY)
     return base64.b64encode(s=buffer.getvalue()).decode(encoding="ascii")
+
+
+def image_block(image: Image.Image) -> dict[str, Any]:
+    """LangChain image content block holding the image as a base64 JPEG data URL."""
+    return {
+        "type": "image_url",
+        "image_url": {"url": f"data:image/jpeg;base64,{to_base64_jpeg(image)}"},
+    }

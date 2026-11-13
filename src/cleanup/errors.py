@@ -1,0 +1,2 @@
+class UnknownProviderError(ValueError):
+    pass
