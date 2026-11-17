@@ -38,6 +38,9 @@ from cleanup.llm import UsageTally, build_chain
 log = structlog.get_logger()
 
 NOISE_CLUSTER = -1
+# cluster of a montage that pools the small groups of one brand (see build_units). Far from
+# the gallery's own codes: -1 is noise, and -2 / -3 also occur in analysis.parquet.
+PACKED_CLUSTER = -100
 UNSAFE_CHARS = re.compile(r"[^a-z0-9]+")
 MONTAGE_QUALITY = 90
 # Answers that do not match the schema; another call may well succeed. Auth errors, missing
@@ -76,7 +79,8 @@ def review_run(settings: GallerySettings, run: str, scope: ReviewScope) -> dict[
     paths, crops = load_run(settings, run)
     pending: pl.DataFrame = pending_crops(crops, paths, settings.judge, scope)
     units: list[ReviewUnit] = order_units(
-        build_units(pending, settings.montage_size), paths.priority
+        build_units(crops=pending, size=settings.montage_size, pack=settings.pack_small_groups),
+        priority_csv=paths.priority,
     )[: scope.max_units]
     if not units:
         log.info("nothing_to_review", run=run, judge=settings.judge)
@@ -205,20 +209,36 @@ def pending_crops(
     return selected.filter(~pl.col("crop_id").is_in(list(done)))
 
 
-def build_units(crops: pl.DataFrame, size: int) -> list[ReviewUnit]:
-    """Chunk crops into montages per (brand, cluster); least-agreeing crops first."""
+def build_units(crops: pl.DataFrame, size: int, pack: bool = False) -> list[ReviewUnit]:
+    """Chunk crops into montages per (brand, cluster); least-agreeing crops first.
+
+    With `pack`, each group still fills its own full montages, but the remainders (small
+    clusters, the tail of big ones) are pooled per brand into shared montages instead of one
+    near-empty montage each; on the full gallery that roughly halves the number of calls. A
+    pooled montage mixing clusters gets cluster PACKED_CLUSTER.
+    """
     ordered: pl.DataFrame = crops.with_columns(
         group=pl.when(pl.col("cluster") == NOISE_CLUSTER)
         .then(pl.lit("noise:") + pl.col("knn_pred"))
         .otherwise(pl.lit("cluster:") + pl.col("cluster").cast(pl.String))
     ).sort(["brand", "group", "knn_agreement", "crop_id"])
     units: list[ReviewUnit] = []
+    leftovers: dict[str, list[tuple[int, str]]] = {}
     for (brand, _group), frame in ordered.group_by(["brand", "group"], maintain_order=True):
         ids: list[str] = frame["crop_id"].to_list()
         cluster: int = int(frame["cluster"][0])
+        whole: int = len(ids) - len(ids) % size if pack else len(ids)
         units += [
-            make_unit(str(brand), cluster, ids[i : i + size]) for i in range(0, len(ids), size)
+            make_unit(brand=str(brand), cluster=cluster, crop_ids=ids[i : i + size])
+            for i in range(0, whole, size)
         ]
+        leftovers.setdefault(str(brand), []).extend((cluster, c) for c in ids[whole:])
+    for brand, pooled in leftovers.items():
+        for i in range(0, len(pooled), size):
+            chunk: list[tuple[int, str]] = pooled[i : i + size]
+            clusters: set[int] = {cluster for cluster, _ in chunk}
+            cluster = clusters.pop() if len(clusters) == 1 else PACKED_CLUSTER
+            units.append(make_unit(brand, cluster, [c for _, c in chunk]))
     return units
 
 

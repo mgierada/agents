@@ -285,3 +285,10 @@ def test_langchain_structured_tallies_cache_writes() -> None:
     judge(MESSAGES)
 
     assert judge.usage["cache_creation_input_tokens"] == 900
+
+
+def test_converse_output_limit_fits_a_full_montage(converse: type[FakeConverse]) -> None:
+    build_chain("bedrock-converse:global.anthropic.claude-haiku-5-5", JudgeVerdict)
+
+    # ~900 tokens measured for 16 crops; keep >2x margin but no more (quota reservation).
+    assert 1800 <= converse.seen["max_tokens"] <= 2048

@@ -248,3 +248,8 @@ graph TD;
   - Haiku with a cache miss: ≈ $0.0016. Misses happen on the first call, or after a gap of more than 5 minutes between calls.
 
 
+Pilot run
+```bash
+make gallery-pilot-run
+make gallery-review-run --max-units 200
+```

@@ -6,7 +6,8 @@ SCOPE ?= borderline
 # gallery audit
 GALLERY ?= ../highfive-models/pre_processed/logo_audit_batches_1-10_17-31_with_pseudolabels__2024-11-22__distill-8baece-c0.7
 TARGETS ?= ../highfive-models/highfive_models/data_processing/target_lists/target_logos_2024-11-25.txt
-RUN ?= calib
+# RUN ?= calib
+RUN ?= pilot
 # JUDGE ?= bedrock-converse:qwen.qwen3-vl-235b-a22b
 JUDGE ?= bedrock-converse:global.anthropic.claude-haiku-5-5
 # JUDGE ?= ollama:qwen2.5vl:7b
@@ -36,8 +37,14 @@ dry-run: ## Assess DATA and write report only
 run-vlm: ## Run cleanup with a VLM judge (VLM=claude:claude-opus-5-5|ollama:qwen2.5vl:7b, SCOPE=...)
 	uv run cleanup run --data-dir $(DATA) --output-dir $(OUT) --judge-model $(VLM) --judge-scope $(SCOPE)
 
+gallery-pilot-run: ## Pilot run to smoke test all is fine
+	uv run cleanup gallery init --run $(RUN) $(GARGS) --top-brands 20 
+
 gallery-calib: ## Gallery: new run RUN with a 300-crop calibration sample
 	uv run cleanup gallery init --run $(RUN) $(GARGS) --calibration-sample 300
+
+gallery-review-pilot: ## Pilot review run
+	uv run cleanup gallery review --run $(RUN) $(GARGS) --judge $(JUDGE) $(ARGS)
 
 gallery-review: ## Gallery: VLM review of RUN (JUDGE=..., ARGS="--max-units 20")
 	uv run cleanup gallery review --run $(RUN) $(GARGS) --judge $(JUDGE) $(ARGS)

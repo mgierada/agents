@@ -49,7 +49,11 @@ BEDROCK_MODEL_PREFIX = "anthropic."
 BEDROCK_API_KEY_ENV_VARS: tuple[str, ...] = ("AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_AWS_API_KEY")
 DATA_URL_PREFIX = "data:"
 CLAUDE_MAX_TOKENS = 16000
-CONVERSE_MAX_TOKENS = 8192
+# A full 16-crop montage verdict is ~900 output tokens (measured with Haiku 5.5): 2048 keeps
+# >2x margin. Kept low because Bedrock may reserve max_tokens against the tokens-per-minute
+# quota when a call starts, which caps how many workers can run at once. A verdict cut off at
+# the limit fails validation and is retried.
+CONVERSE_MAX_TOKENS = 2048
 # Room for many concurrent review workers; adaptive retries back off on throttling.
 CONVERSE_MAX_CONNECTIONS = 64
 CONVERSE_MAX_ATTEMPTS = 8
