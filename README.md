@@ -153,7 +153,12 @@ of the brand (one per video, editable in `references.json`), is sent as one imag
 REFERENCE section (not judged) above a REVIEW section. The judge returns per-crop verdicts
 (`brand_match`, `different_brand`, `unrecognisable`, `not_a_logo`) with visible text, the brand
 actually shown and a confidence. The system prompt holds the target list and is
-prompt-cached. Hard-flagged crops are not sent (`--include-flagged` to override). An answer that does
+prompt-cached. Hard-flagged crops are not sent (`--include-flagged` to override). Groups
+with 16+ crops fill their own cluster-pure montages; the leftovers (small clusters, tails of big
+ones) are pooled per brand into shared montages (`CLEANUP_GALLERY_PACK_SMALL_GROUPS`, default on;
+on the full gallery: 64k calls instead of 134k). `review` runs 16 judge calls at once by default
+(`--workers`; lower it for a local Ollama judge). Logs tolerate a half-written last line left by
+a killed run: it is skipped with a warning and new rows start on a fresh line. An answer that does
 not match the schema (e.g. a tile label in `cluster_verdict`) is retried up to
 `CLEANUP_GALLERY_JUDGE_RETRIES` times (default 2, logged as `unit_retry`, each retry billed);
 auth errors, unknown models and refusals are not retried.

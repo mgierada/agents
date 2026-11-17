@@ -80,6 +80,7 @@ def settings(
         judge="fake:judge",
         workers=1,
         min_side_px=20,
+        pack_small_groups=False,  # one montage per cluster, as these tests assume
     )
 
 
@@ -510,3 +511,47 @@ def test_second_opinion_errors_are_reported(
         api_rejudge(state, {"crop_id": "missing", "judge": "fake:second"})
 
     assert len(jsonl.read(reviewed.judgements)) == judged_before
+
+
+def crops_frame(groups: dict[tuple[str, int], int]) -> pl.DataFrame:
+    """Synthetic crops: `n` crops per (brand, cluster)."""
+    rows: list[dict[str, Any]] = [
+        {
+            "crop_id": f"{brand}-{cluster}-{i:02d}",
+            "brand": brand,
+            "cluster": cluster,
+            "knn_pred": brand,
+            "knn_agreement": 1.0,
+        }
+        for (brand, cluster), n in groups.items()
+        for i in range(n)
+    ]
+    return pl.DataFrame(rows)
+
+
+def test_packing_pools_small_groups_per_brand() -> None:
+    crops: pl.DataFrame = crops_frame(
+        {("acme", 0): 20, ("acme", 1): 3, ("acme", 2): 2, ("zeta", 0): 2}
+    )
+
+    unpacked: list[review.ReviewUnit] = review.build_units(crops, 16)
+    packed: list[review.ReviewUnit] = review.build_units(crops, 16, pack=True)
+
+    assert [len(u.crop_ids) for u in unpacked] == [16, 4, 3, 2, 2]
+    assert [(u.brand, u.cluster, len(u.crop_ids)) for u in packed] == [
+        ("acme", 0, 16),  # a full montage stays cluster-pure
+        ("acme", review.PACKED_CLUSTER, 9),  # 4 + 3 + 2 leftovers of acme pooled
+        ("zeta", 0, 2),  # a lone leftover keeps its cluster
+    ]
+    all_ids: list[str] = sorted(c for u in packed for c in u.crop_ids)
+    assert all_ids == sorted(crops["crop_id"])  # nothing lost or duplicated
+
+
+def test_packing_never_mixes_brands_or_exceeds_size() -> None:
+    crops: pl.DataFrame = crops_frame({("acme", c): 5 for c in range(7)} | {("zeta", 0): 5})
+
+    packed: list[review.ReviewUnit] = review.build_units(crops, 16, pack=True)
+
+    assert all(len(u.crop_ids) <= 16 for u in packed)
+    assert all(c.startswith(f"{u.brand}-") for u in packed for c in u.crop_ids)
+    assert [len(u.crop_ids) for u in packed if u.brand == "acme"] == [16, 16, 3]

@@ -50,6 +50,9 @@ BEDROCK_API_KEY_ENV_VARS: tuple[str, ...] = ("AWS_BEARER_TOKEN_BEDROCK", "ANTHRO
 DATA_URL_PREFIX = "data:"
 CLAUDE_MAX_TOKENS = 16000
 CONVERSE_MAX_TOKENS = 8192
+# Room for many concurrent review workers; adaptive retries back off on throttling.
+CONVERSE_MAX_CONNECTIONS = 64
+CONVERSE_MAX_ATTEMPTS = 8
 # Converse prompt caching: only Claude ids get a cache point (Qwen etc. reject it).
 CONVERSE_CACHING_MARKER = "anthropic."
 CONVERSE_CACHE_POINT: dict[str, Any] = {"cachePoint": {"type": "default"}}
@@ -94,7 +97,9 @@ def build_chain(
         )
     if provider == "bedrock-converse":
         return RunnableLambda(
-            LangChainStructured(provider, structured=converse_structured(model, schema))
+            LangChainStructured(
+                provider, structured=converse_structured(model, schema, effort=effort)
+            )
         )
     if provider == "openai":
         return RunnableLambda(
@@ -118,15 +123,19 @@ def openai_structured(model: str, schema: type[BaseModel]) -> Runnable[list[Base
     )
 
 
-def converse_structured(model: str, schema: type[BaseModel]) -> Runnable[list[BaseMessage], Any]:
+def converse_structured(
+    model: str, schema: type[BaseModel], effort: Effort = "low"
+) -> Runnable[list[BaseMessage], Any]:
     """ChatBedrockConverse with tool-call structured output, returning raw message and parsed model.
 
     Uses the same profile and region resolution as `bedrock_client`. The profile is passed
     explicitly so the zoomph-style named profile is used, not whatever the default chain finds.
-    Claude models (`anthropic.` in the id) get a prompt-cache point after the system prompt
-    and no temperature; other models get temperature 0 and no cache point, since Bedrock
-    rejects it for models without caching.
+    Claude models (`anthropic.` in the id) get a prompt-cache point after the system prompt,
+    `effort` (fewer thinking tokens at low) and no temperature; other models get temperature 0
+    and neither, since Bedrock rejects a cache point for models without caching. The boto
+    client keeps enough connections for many review workers and backs off when throttled.
     """
+    from botocore.config import Config
     from langchain_aws import ChatBedrockConverse
 
     profile: str | None = os.environ.get("AWS_PROFILE") or None
@@ -137,6 +146,13 @@ def converse_structured(model: str, schema: type[BaseModel]) -> Runnable[list[Ba
         region_name=bedrock_region(profile),
         temperature=None if is_claude else 0,  # current Claude models reject temperature
         max_tokens=CONVERSE_MAX_TOKENS,
+        additional_model_request_fields={"output_config": {"effort": effort}}
+        if is_claude
+        else None,
+        config=Config(
+            max_pool_connections=CONVERSE_MAX_CONNECTIONS,
+            retries={"mode": "adaptive", "max_attempts": CONVERSE_MAX_ATTEMPTS},
+        ),
     )
     structured: Runnable[list[BaseMessage], Any] = chat.with_structured_output(
         schema=schema, include_raw=True

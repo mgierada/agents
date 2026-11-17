@@ -1,5 +1,3 @@
-"""Settings of the gallery audit and the on-disk layout of one audit run."""
-
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,7 +76,11 @@ class GallerySettings(BaseSettings):
     reference_count: int = 4
     reference_min_agreement: float = 0.9
     reference_min_side_px: int = 64
-    review_workers: int = 4
+    # Concurrent judge calls. Haiku on Bedrock allows far more (10M tokens/min); lower it for a
+    # local Ollama judge.
+    review_workers: int = 64
+    # Pool the small (brand, cluster) groups of a brand into shared montages (~half the calls).
+    pack_small_groups: bool = True
     # Extra judge calls for a unit whose answer does not match the schema (0 = no retry).
     judge_retries: int = 2
     # How often the UI polls review progress and spend, in seconds.

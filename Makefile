@@ -93,3 +93,5 @@ clean: ## Remove caches
 
 clean-output: ## Delete OUT directory
 	rm -rf $(OUT)
+
+#TODO: Add plots filtering out flags
