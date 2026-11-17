@@ -318,6 +318,8 @@
 <body>
   <header>
     <h1 id="title">Gallery Audit</h1>
+    <label class="help" title="Runs of this gallery (agent_audit/); each browser tab can show a different one">run
+      <select id="run-picker"><option>loading…</option></select></label>
     <span class="stats" id="stats"></span>
     <span class="stats" id="spend"
       title="Estimated judge spend from review_log.jsonl token usage; see the Cost tab"></span>
@@ -440,8 +442,15 @@
     const KEYS = {"1": "brand_match", "2": "different_brand", "3": "unrecognisable", "4": "not_a_logo"};
     let meta = null, items = [], total = 0, offset = 0, sel = 0;
 
+    let currentRun = new URLSearchParams(location.search).get("run");
+    const withRun = (path) => {
+      const url = new URL(path, location.href);
+      if (currentRun) url.searchParams.set("run", currentRun);
+      return url.pathname + url.search;
+    };
+
     async function api(path, body) {
-      const res = await fetch(path, body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
+      const res = await fetch(withRun(path), body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || res.statusText);
       return data;
@@ -454,6 +463,11 @@
 
     async function loadMeta() {
       meta = await api("/api/meta");
+      if (currentRun !== meta.run) {
+        currentRun = meta.run;
+        const url = new URL(location.href); url.searchParams.set("run", meta.run);
+        history.replaceState(null, "", url);
+      }
       HARD = new Set(meta.hard_flags);
       $("title").textContent = `Gallery Audit · ${meta.run}`;
       const d = meta.summary.decisions || {};
@@ -567,7 +581,7 @@
           sel = i; markSel();
           const b = e.target.closest("button");
           if (!b) return;
-          if (b.dataset.h) return history(items[i].crop_id);
+          if (b.dataset.h) return showHistory(items[i].crop_id);
           if (b.dataset.r) return openRejudge(i);
           if (b.dataset.run) return rejudge(i);
           label(i, b.dataset.v || null);
@@ -637,7 +651,8 @@
       }
     }
 
-    async function history(cropId) {
+    // Not named `history`: that would hide window.history (used to put ?run= in the URL).
+    async function showHistory(cropId) {
       const h = await api(`/api/history?crop_id=${encodeURIComponent(cropId)}`);
       const units = [...new Set(h.judgements.map((j) => j.unit_id))];
       const rows = [
@@ -649,8 +664,8 @@
     <table><tr><th>when</th><th>who</th><th>verdict</th><th></th></tr>
     ${rows.map((r) => `<tr><td>${esc(r.ts)}</td><td>${esc(r.who)}</td><td>${esc(r.what)}</td><td class="text">${esc(r.extra)}</td></tr>`).join("") || "<tr><td colspan=4>no history</td></tr>"}</table>
     ${units.map((u) => `<h4>What the judge saw (${esc(u)})</h4>
-      <img src="/montages/${encodeURIComponent(u)}_refs.jpg" onerror="this.remove()"><br>
-      <img src="/montages/${encodeURIComponent(u)}.jpg">`).join("")}`;
+      <img src="${withRun(`/montages/${encodeURIComponent(u)}_refs.jpg`)}" onerror="this.remove()"><br>
+      <img src="${withRun(`/montages/${encodeURIComponent(u)}.jpg`)}">`).join("")}`;
       $("dlg").showModal();
     }
 
@@ -700,8 +715,30 @@
         (stale ? ` · <span class="warn">no update for ${ago(p.updated)}: stopped or stuck?</span>` : "");
     }
 
+    const runLabel = (r) => `${r.run} · ${r.n_crops ?? "?"} crops${r.review_status === "running" ? " · reviewing…" : ""}`;
+
+    async function loadRuns() {
+      let runs;
+      try {runs = await api("/api/runs");} catch {return;}
+      const picker = $("run-picker");
+      const names = runs.map((r) => r.run).join("\n");
+      const shown = [...picker.options].map((o) => o.value).join("\n");
+      if (names === shown) {
+        // Same runs: only refresh the labels, so an open dropdown is not rebuilt under the user.
+        runs.forEach((r, i) => {picker.options[i].textContent = runLabel(r);});
+      } else {
+        picker.innerHTML = runs.map((r) => `<option value="${esc(r.run)}">${esc(runLabel(r))}</option>`).join("");
+      }
+      markRun();
+    }
+
+    function markRun() {
+      // currentRun is null on the bare homepage until /api/meta names the default run.
+      if (currentRun && [...$("run-picker").options].some((o) => o.value === currentRun)) $("run-picker").value = currentRun;
+    }
+
     async function poll() {
-      await Promise.all([loadProgress(), loadSpend()]);
+      await Promise.all([loadProgress(), loadSpend(), loadRuns()]);
       if ($("f-review").value && !document.querySelector(".other:not(.hidden), .rejudge:not(.hidden)")) loadItems();  // keep a review view live
     }
 
@@ -734,6 +771,11 @@
     document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
     $("prev").onclick = () => {if (offset > 0) {offset = Math.max(0, offset - LIMIT); loadItems();} };
     $("next").onclick = () => {if (offset + LIMIT < total) {offset += LIMIT; loadItems();} };
+    $("run-picker").onchange = (e) => {
+      const url = new URL(location.href);
+      url.search = `?run=${encodeURIComponent(e.target.value)}`;
+      location.href = url;  // fresh page: filters, paging and selection belong to the old run
+    };
     $("accept-relabels").onclick = async () => {
       const n = await countSuggested();
       if (!n) return;
@@ -756,14 +798,14 @@
       else if (e.key === "ArrowUp") {e.preventDefault(); sel = Math.max(0, sel - COLS); markSel();}
       else if (e.key === "n") $("next").click();
       else if (e.key === "p") $("prev").click();
-      else if (e.key === "h" && items[sel]) history(items[sel].crop_id);
+      else if (e.key === "h" && items[sel]) showHistory(items[sel].crop_id);
       else if (e.key === "r" && items[sel]) {e.preventDefault(); openRejudge(sel);}
       else if (e.key === "0" && items[sel]) label(sel, null);
       else if (e.key === "a" && items[sel]?.decision === "suggested_relabel") label(sel, "different_brand", items[sel].relabel_target);
       else if (KEYS[e.key] && items[sel]) {e.preventDefault(); label(sel, KEYS[e.key]);}
     });
 
-    (async () => {initLayout(); await loadMeta(); poll(); setInterval(poll, 1000 * (meta.refresh_seconds || 10)); await initFilters(); await loadItems();})();
+    (async () => {initLayout(); loadRuns(); await loadMeta(); markRun(); poll(); setInterval(poll, 1000 * (meta.refresh_seconds || 10)); await initFilters(); await loadItems();})();
   </script>
 </body>
 

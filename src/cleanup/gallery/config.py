@@ -78,7 +78,7 @@ class GallerySettings(BaseSettings):
     reference_min_side_px: int = 64
     # Concurrent judge calls. Haiku on Bedrock allows far more (10M tokens/min); lower it for a
     # local Ollama judge.
-    review_workers: int = 32
+    review_workers: int = 40
     # Pool the small (brand, cluster) groups of a brand into shared montages (~half the calls).
     pack_small_groups: bool = True
     # Extra judge calls for a unit whose answer does not match the schema (0 = no retry).

@@ -6,6 +6,7 @@ run's events.jsonl (never rewritten), so the full history of every crop stays vi
 
 import json
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from http import HTTPStatus
@@ -225,8 +226,52 @@ def review_filter(review: str, activity: ReviewActivity) -> pl.Expr:
     raise ValueError(f"unknown review filter {review!r}")
 
 
-def make_handler(state: RunState) -> type[BaseHTTPRequestHandler]:
-    """Request handler bound to one run."""
+@dataclass
+class RunRegistry:
+    """Runs of one gallery, loaded on first use; each request names its run (`?run=`).
+
+    Every browser tab can show a different run; requests without a run get `default`.
+    """
+
+    settings: GallerySettings
+    default: str
+    states: dict[str, RunState] = field(default_factory=dict)
+    lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def get(self, run: str | None) -> RunState:
+        """The run's state, loading it the first time; ValueError for unknown runs."""
+        name: str = run or self.default
+        if not SAFE_NAME.match(name) or not self.settings.run_paths(name).run_json.exists():
+            raise ValueError(f"unknown run {name!r}")
+        with self.lock:
+            if name not in self.states:
+                self.states[name] = RunState(settings=self.settings, run=name)
+            return self.states[name]
+
+
+def api_runs(registry: RunRegistry) -> list[dict[str, Any]]:
+    """Every run of the gallery, newest first, with size and review status."""
+    rows: list[dict[str, Any]] = []
+    for run_json in registry.settings.audit_root.glob("*/run.json"):
+        info: dict[str, Any] = json.loads(run_json.read_text())
+        progress: Path = run_json.parent / "review_progress.json"
+        status: str | None = (
+            json.loads(progress.read_text()).get("status") if progress.exists() else None
+        )
+        rows.append(
+            {
+                "run": run_json.parent.name,
+                "created_at": info.get("created_at"),
+                "n_crops": info.get("n_crops"),
+                "n_brands": info.get("n_brands"),
+                "review_status": status,
+            }
+        )
+    return sorted(rows, key=lambda r: r["created_at"] or "", reverse=True)
+
+
+def make_handler(registry: RunRegistry) -> type[BaseHTTPRequestHandler]:
+    """Request handler; each request picks its run with `?run=` (default: the served run)."""
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - stdlib name
@@ -237,6 +282,14 @@ def make_handler(state: RunState) -> type[BaseHTTPRequestHandler]:
             """Static page, images and read-only API."""
             url = urlparse(self.path)
             query: dict[str, str] = {k: v[-1] for k, v in parse_qs(url.query).items()}
+            if url.path in ("/", "/index.html"):
+                return self.send_bytes(page(), "text/html; charset=utf-8")
+            if url.path == "/api/runs":
+                return self.send_json(api_runs(registry))
+            try:
+                state: RunState = registry.get(query.pop("run", None))
+            except ValueError as exc:
+                return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             routes: dict[str, Any] = {
                 "/api/meta": lambda: api_meta(state),
                 "/api/items": lambda: api_items(state, query),
@@ -248,8 +301,6 @@ def make_handler(state: RunState) -> type[BaseHTTPRequestHandler]:
             }
             if url.path in routes:
                 return self.send_json(routes[url.path]())
-            if url.path in ("/", "/index.html"):
-                return self.send_bytes(page(), "text/html; charset=utf-8")
             for prefix, root in (
                 ("/crops/", state.settings.crops_dir),
                 ("/montages/", state.paths.montages),
@@ -262,8 +313,11 @@ def make_handler(state: RunState) -> type[BaseHTTPRequestHandler]:
             """Write endpoints: add a label, re-run resolve."""
             length: int = int(self.headers.get("Content-Length", 0))
             body: dict[str, Any] = json.loads(self.rfile.read(length) or b"{}")
-            path: str = urlparse(self.path).path
+            url = urlparse(self.path)
+            path: str = url.path
+            run: str | None = parse_qs(url.query).get("run", [None])[-1]
             try:
+                state: RunState = registry.get(run)
                 if path == "/api/label":
                     return self.send_json(api_label(state, body))
                 if path == "/api/accept_relabels":
@@ -485,9 +539,10 @@ def api_resolve(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def serve(settings: GallerySettings, run: str, port: int) -> None:
-    """Serve the UI for a run until interrupted."""
-    state = RunState(settings=settings, run=run)
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(state))
+    """Serve the UI (opening on `run`; any run of the gallery can be picked) until interrupted."""
+    registry = RunRegistry(settings=settings, default=run)
+    state: RunState = registry.get(run)
+    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(registry))
     log.info("ui", url=f"http://127.0.0.1:{port}", run=run, crops=state.items.height)
     try:
         server.serve_forever()

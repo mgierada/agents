@@ -163,6 +163,11 @@ not match the schema (e.g. a tile label in `cluster_verdict`) is retried up to
 `CLEANUP_GALLERY_JUDGE_RETRIES` times (default 2, logged as `unit_retry`, each retry billed);
 auth errors, unknown models and refusals are not retried.
 
+**Runs.** `ui --run X` opens on run X, but the **run** picker in the header switches to any
+run of the gallery (`agent_audit/*/`, newest first, marked *reviewing…* while a review runs).
+The run is in the URL (`?run=pilot`), so each browser tab can show a different run and links
+can be bookmarked.
+
 **Progress.** While `review` runs it rewrites `review_progress.json` in the run dir (units and
 crops done, errors, status). The UI shows it as a bar under the header with an ETA, and marks
 it stopped or stale if the review was interrupted. The **review** filter shows `pending` crops
@@ -251,5 +256,5 @@ graph TD;
 Pilot run
 ```bash
 make gallery-pilot-run
-make gallery-review-run --max-units 200
+make gallery-review-pilot ARGS="--max-units 200"
 ```

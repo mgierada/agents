@@ -21,6 +21,7 @@ from cleanup.gallery.judge import MontageVerdict, TileLabel, TileVerdict
 from cleanup.gallery.resolve import decide, resolve_run
 from cleanup.gallery.run import init_run
 from cleanup.gallery.server import (
+    RunRegistry,
     RunState,
     api_accept_relabels,
     api_items,
@@ -28,6 +29,7 @@ from cleanup.gallery.server import (
     api_meta,
     api_progress,
     api_rejudge,
+    api_runs,
     api_spend,
 )
 from cleanup.gallery.subset import Subset
@@ -555,3 +557,30 @@ def test_packing_never_mixes_brands_or_exceeds_size() -> None:
     assert all(len(u.crop_ids) <= 16 for u in packed)
     assert all(c.startswith(f"{u.brand}-") for u in packed for c in u.crop_ids)
     assert [len(u.crop_ids) for u in packed if u.brand == "acme"] == [16, 16, 3]
+
+
+def test_run_registry_serves_each_run_and_rejects_unknown(settings: GallerySettings) -> None:
+    init_run(settings, "r1", Subset())
+    init_run(settings, "r2", Subset(brands=("acme",)))
+    registry = RunRegistry(settings=settings, default="r1")
+
+    assert registry.get(None).run == "r1"
+    assert registry.get("r2").items.height < registry.get("r1").items.height
+    assert registry.get("r2") is registry.get("r2")  # loaded once, then reused
+    for bad in ("nope", "../r1", "r1/../r2"):
+        with pytest.raises(ValueError, match="unknown run"):
+            registry.get(bad)
+
+
+def test_api_runs_lists_runs_with_review_status(settings: GallerySettings) -> None:
+    init_run(settings, "r1", Subset())
+    review.review_run(settings, "r1", review.ReviewScope())
+    init_run(settings, "r2", Subset(brands=("acme",)))
+
+    runs: list[dict[str, Any]] = api_runs(RunRegistry(settings=settings, default="r1"))
+
+    by_name: dict[str, dict[str, Any]] = {r["run"]: r for r in runs}
+    assert set(by_name) == {"r1", "r2"}
+    assert by_name["r1"]["review_status"] == "finished"
+    assert by_name["r2"]["review_status"] is None
+    assert by_name["r2"]["n_crops"] < by_name["r1"]["n_crops"]
