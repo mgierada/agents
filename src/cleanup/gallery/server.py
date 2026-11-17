@@ -63,7 +63,11 @@ ITEM_COLUMNS: tuple[str, ...] = (
 
 @dataclass
 class RunState:
-    """Everything the UI shows for one run; reloaded after a resolve."""
+    """Everything the UI shows for one run.
+
+    Crops and decisions are loaded once (and again after a resolve); judge verdicts follow
+    judgements.jsonl as it grows, so a review running in another process shows up live.
+    """
 
     settings: GallerySettings
     run: str
@@ -72,24 +76,32 @@ class RunState:
     targets: list[str] = field(init=False)
     # (file, mtime_ns, size) -> parsed content, so polling large runs stays cheap.
     file_cache: dict[tuple[str, int, int], Any] = field(init=False, default_factory=dict)
+    # Crops + decisions without judge columns; verdicts are joined on top in `refresh_judgements`.
+    base: pl.DataFrame = field(init=False)
+    verdicts: pl.DataFrame = field(init=False)
+    # Bytes of judgements.jsonl already folded into `verdicts`.
+    judged_offset: int = field(init=False, default=0)
+    lock: threading.RLock = field(init=False, default_factory=threading.RLock, repr=False)
 
     def __post_init__(self) -> None:
         """Load the run's tables."""
         self.reload()
 
     def reload(self) -> None:
-        """Join crops, flags, latest judge verdict and the last resolve's decisions."""
-        self.paths, crops = load_run(self.settings, self.run)
-        items: pl.DataFrame = crops.select([c for c in ITEM_COLUMNS if c in crops.columns]).rename(
-            {"confidence": "teacher_conf"}
-        )
-        items = items.join(latest_judgements(self.paths), on="crop_id", how="left")
-        if self.paths.decisions.exists():
-            decisions: pl.DataFrame = pl.read_parquet(self.paths.decisions).drop(
-                "brand_before", "suggested_brand", "visible_text", "confidence"
-            )
-            items = items.join(decisions, on="crop_id", how="left")
-        self.items = items
+        """Join crops, flags and the last resolve's decisions, then every judge verdict."""
+        with self.lock:
+            self.paths, crops = load_run(self.settings, self.run)
+            base: pl.DataFrame = crops.select(
+                [c for c in ITEM_COLUMNS if c in crops.columns]
+            ).rename({"confidence": "teacher_conf"})
+            if self.paths.decisions.exists():
+                decisions: pl.DataFrame = pl.read_parquet(self.paths.decisions).drop(
+                    "brand_before", "suggested_brand", "visible_text", "confidence"
+                )
+                base = base.join(decisions, on="crop_id", how="left")
+            self.base = base
+            self.verdicts, self.judged_offset = judgements_frame([]), 0
+            self.refresh_judgements(force=True)
         self.targets = sorted(
             load_catalog(
                 self.settings.target_list,
@@ -98,18 +110,66 @@ class RunState:
             ).targets
         )
 
+    def refresh_judgements(self, force: bool = False) -> None:
+        """Fold verdicts appended to judgements.jsonl since the last call into `items`.
 
-def latest_judgements(paths: RunPaths) -> pl.DataFrame:
-    """Latest judge verdict per crop, as `judge_*` columns."""
-    latest: dict[str, dict[str, Any]] = jsonl.latest_by(jsonl.read(paths.judgements), "crop_id")
-    rows: list[dict[str, Any]] = [
-        {"crop_id": crop_id} | {dst: row.get(src) or None for src, dst in JUDGE_FIELDS.items()}
-        for crop_id, row in latest.items()
-    ]
+        Reads only the new bytes (complete lines), so it is cheap enough to run on every
+        request even while a full-gallery review is appending.
+        """
+        with self.lock:
+            path: Path = self.paths.judgements
+            size: int = path.stat().st_size if path.exists() else 0
+            if size < self.judged_offset:  # file replaced or truncated: start over
+                self.verdicts, self.judged_offset, force = judgements_frame([]), 0, True
+            if size == self.judged_offset and not force:
+                return
+            rows, consumed = read_new_lines(path, self.judged_offset)
+            self.judged_offset += consumed
+            if rows or force:
+                new: pl.DataFrame = judgements_frame(rows).unique(
+                    "crop_id", keep="last", maintain_order=True
+                )
+                kept: pl.DataFrame = self.verdicts.join(new, on="crop_id", how="anti")
+                self.verdicts = pl.concat([kept, new])
+                self.items = self.base.join(self.verdicts, on="crop_id", how="left")
+
+
+def read_new_lines(path: Path, offset: int) -> tuple[list[dict[str, Any]], int]:
+    """JSONL rows after byte `offset`, up to the last complete line; and the bytes consumed.
+
+    A line still being written (no newline yet) is left for the next call. Unparseable
+    complete lines (a writer killed mid-line earlier) are skipped.
+    """
+    if not path.exists():
+        return [], 0
+    with path.open("rb") as f:
+        f.seek(offset)
+        data: bytes = f.read()
+    end: int = data.rfind(b"\n") + 1
+    rows: list[dict[str, Any]] = []
+    for line in data[:end].decode().splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            log.warning("judgement_line_skipped", path=str(path))
+    return rows, end
+
+
+def judgements_frame(rows: list[dict[str, Any]]) -> pl.DataFrame:
+    """judgements.jsonl rows (append order) as `crop_id` + `judge_*` columns."""
     schema: dict[str, type[pl.DataType]] = {"crop_id": pl.String} | {
         dst: pl.String for dst in JUDGE_FIELDS.values()
     }
-    return pl.DataFrame(rows, schema=schema)
+    return pl.DataFrame(
+        [
+            {"crop_id": row["crop_id"]}
+            | {dst: row.get(src) or None for src, dst in JUDGE_FIELDS.items()}
+            for row in rows
+        ],
+        schema=schema,
+    )
 
 
 @dataclass(frozen=True)
@@ -246,7 +306,9 @@ class RunRegistry:
         with self.lock:
             if name not in self.states:
                 self.states[name] = RunState(settings=self.settings, run=name)
-            return self.states[name]
+            state: RunState = self.states[name]
+        state.refresh_judgements()  # pick up verdicts a running review appended meanwhile
+        return state
 
 
 def api_runs(registry: RunRegistry) -> list[dict[str, Any]]:

@@ -584,3 +584,27 @@ def test_api_runs_lists_runs_with_review_status(settings: GallerySettings) -> No
     assert by_name["r1"]["review_status"] == "finished"
     assert by_name["r2"]["review_status"] is None
     assert by_name["r2"]["n_crops"] < by_name["r1"]["n_crops"]
+
+
+def test_ui_follows_verdicts_appended_by_a_running_review(settings: GallerySettings) -> None:
+    init_run(settings, "r1", Subset())
+    registry = RunRegistry(settings=settings, default="r1")
+    paths: RunPaths = registry.get("r1").paths
+    crop_a, crop_b = sorted(registry.get("r1").items["crop_id"])[:2]
+
+    def verdict(crop_id: str, label: str) -> dict[str, Any]:
+        return {"crop_id": crop_id, "judge": "fake:judge", "verdict": label, "ts": jsonl.now()}
+
+    assert registry.get("r1").items["judge_verdict"].is_null().all()
+    jsonl.append(paths.judgements, [verdict(crop_a, "brand_match")])  # another process
+    with paths.judgements.open("a") as f:
+        f.write(json.dumps(verdict(crop_b, "not_a_logo"))[:20])  # still being written
+
+    def shown(crop_id: str) -> str | None:
+        items: pl.DataFrame = registry.get("r1").items
+        return items.filter(pl.col("crop_id") == crop_id)["judge_verdict"].item()
+
+    assert (shown(crop_a), shown(crop_b)) == ("brand_match", None)
+    with paths.judgements.open("a") as f:
+        f.write(json.dumps(verdict(crop_b, "not_a_logo"))[20:] + "\n")  # line completed
+    assert shown(crop_b) == "not_a_logo"
