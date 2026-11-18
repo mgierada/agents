@@ -299,6 +299,11 @@ make gallery-pilot-run
 make gallery-review-pilot ARGS="--max-units 200"
 ```
 
+Full run across the entire dataset:
+
 ```bash
-make gallery-refine NAME=clean                                                                               on  main [+] is 📦 v0.1.0 via 🐍 v3.15.0
+make gallery-full
+make gallery-review
+make gallery-resolve
+make gallery-refine NAME=clean-submodel1-crops
 ```
