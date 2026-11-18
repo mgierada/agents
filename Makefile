@@ -47,12 +47,6 @@ gallery-pilot-run: ## Pilot run to smoke test all is fine
 gallery-calib: ## Gallery: new run RUN with a 300-crop calibration sample
 	uv run cleanup gallery init --run $(RUN) $(GARGS) --calibration-sample 300
 
-gallery-review-full: ## Review the full dataset
-	uv run cleanup gallery review --run $(RUN) $(GARGS) --judge $(JUDGE) $(ARGS)
-
-gallery-review-pilot: ## Pilot review run
-	uv run cleanup gallery review --run $(RUN) $(GARGS) --judge $(JUDGE) $(ARGS)
-
 gallery-review: ## Gallery: VLM review of RUN (JUDGE=..., ARGS="--max-units 20")
 	uv run cleanup gallery review --run $(RUN) $(GARGS) --judge $(JUDGE) $(ARGS)
 
