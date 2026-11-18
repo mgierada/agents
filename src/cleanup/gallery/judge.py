@@ -1,11 +1,11 @@
 """VLM verdicts on montages of crops labelled as one brand."""
 
 from collections.abc import Iterable
-from typing import Literal
+from typing import Literal, get_args
 
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from PIL import Image
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from cleanup.vlm import image_block
 
@@ -14,6 +14,7 @@ ClusterLabel = Literal["consistent", "different_brand", "mixed", "unreadable", "
 Confidence = Literal["low", "medium", "high"]
 
 TILE_LABELS: tuple[str, ...] = ("brand_match", "different_brand", "unrecognisable", "not_a_logo")
+CLUSTER_LABELS: tuple[str, ...] = get_args(ClusterLabel)
 
 SYSTEM_TEMPLATE = """You audit a logo-identification gallery. Each request shows numbered \
 crops that are all labelled as one brand. Decide, for every crop, whether it really shows \
@@ -54,10 +55,10 @@ into visible_text (empty if none).
 - The labelled brand can be wrong; that is what you are checking. Brands can have several \
 logo variants; a variant missing from the references can still be brand_match.
 - Different brands can share colours or shapes. Prefer text over colour when deciding.
-- cluster_verdict summarises the montage and uses its own words, not the crop verdicts: \
-consistent (nearly all brand_match), different_brand (nearly all one other brand; name it \
-in cluster_suggested_brand), unreadable (mostly unrecognisable), not_a_logo (mostly \
-not_a_logo), or mixed (anything else).
+- cluster_verdict summarises the montage. Use exactly one of these five words: consistent \
+when nearly all crops are brand_match; different_brand when nearly all show one other brand \
+(name it in cluster_suggested_brand); unreadable when most are unrecognisable; not_a_logo \
+when most are not_a_logo; mixed otherwise.
 - Return exactly one tile entry per numbered crop.
 
 Target list (brand names, one per line):
@@ -85,6 +86,20 @@ class MontageVerdict(BaseModel):
         description="The other brand when cluster_verdict is different_brand, else empty"
     )
     tiles: list[TileVerdict]
+
+    @field_validator("cluster_verdict", mode="before")
+    @classmethod
+    def lenient_cluster_verdict(cls, value: object) -> object:
+        """Accept near-misses ("mostly_not_a_logo", "Not a logo"); anything else is "mixed".
+
+        The montage summary is informational (resolve uses the per-crop verdicts), so a
+        misspelt summary must not throw away a montage's valid crop verdicts.
+        """
+        if not isinstance(value, str):
+            return value
+        word: str = value.strip().lower().replace(" ", "_").replace("-", "_")
+        word = word.removeprefix("mostly_").removeprefix("nearly_all_")
+        return word if word in CLUSTER_LABELS else "mixed"
 
 
 def system_prompt(targets: Iterable[str]) -> str:

@@ -268,6 +268,40 @@ def filter_items(
     return out
 
 
+def filter_unit(state: RunState, items: pl.DataFrame, unit: str) -> pl.DataFrame:
+    """Crops of one review unit (montage), in tile order; or units whose id contains `unit`.
+
+    An exact unit id is looked up in units.jsonl, so it also finds units whose crops were
+    re-judged since; a partial id (e.g. `devon-energy_c-1`) matches the crops' latest unit.
+    """
+    unit = unit.strip()
+    if not unit:
+        return items
+    members: list[str] | None = unit_members(state, unit)
+    if members is None:
+        # Whole segments first: `devon-energy_c-1` is cluster -1, not also cluster -100.
+        segment: pl.DataFrame = items.filter(pl.col("judge_unit_id").str.starts_with(f"{unit}_"))
+        if not segment.is_empty():
+            return segment
+        return items.filter(pl.col("judge_unit_id").str.contains(unit, literal=True))
+    order: dict[str, int] = {crop_id: i for i, crop_id in enumerate(members)}
+    return (
+        items.filter(pl.col("crop_id").is_in(members))
+        .with_columns(_tile=pl.col("crop_id").replace_strict(order, return_dtype=pl.Int64))
+        .sort("_tile")
+        .drop("_tile")
+    )
+
+
+def unit_members(state: RunState, unit_id: str) -> list[str] | None:
+    """Crop ids of a unit in tile order (latest record of it), or None if no such unit."""
+    rows: list[dict[str, Any]] = cached(state, state.paths.units, jsonl.read)
+    for row in reversed(rows):
+        if row.get("unit_id") == unit_id and row.get("crop_ids"):
+            return list(row["crop_ids"])
+    return None
+
+
 def review_filter(review: str, activity: ReviewActivity) -> pl.Expr:
     """pending = not judged yet or still in the running review; the rest as named."""
     not_judged: pl.Expr = pl.col("judge_verdict").is_null()
@@ -463,7 +497,9 @@ def api_items(state: RunState, query: dict[str, str]) -> dict[str, Any]:
     """One page of filtered crops, each with its latest human label."""
     human: dict[str, dict[str, Any]] = human_labels(state)
     activity: ReviewActivity = review_activity(state)
-    filtered: pl.DataFrame = filter_items(state.items, human, query, activity)
+    filtered: pl.DataFrame = filter_unit(
+        state, filter_items(state.items, human, query, activity), query.get("unit", "")
+    )
     offset: int = max(0, int(query.get("offset", 0)))
     limit: int = min(MAX_PAGE_SIZE, int(query.get("limit", DEFAULT_PAGE_SIZE)))
     page_rows: list[dict[str, Any]] = filtered.slice(offset, limit).to_dicts()
@@ -547,9 +583,9 @@ def api_accept_relabels(state: RunState, body: dict[str, Any]) -> dict[str, Any]
     if "decision" not in state.items.columns:
         raise ValueError("run Resolve first")
     filters: dict[str, str] = {k: str(v) for k, v in (body.get("filters") or {}).items()}
-    candidates: pl.DataFrame = filter_items(state.items, human_labels(state), filters).filter(
-        pl.col("decision") == "suggested_relabel"
-    )
+    candidates: pl.DataFrame = filter_unit(
+        state, filter_items(state.items, human_labels(state), filters), filters.get("unit", "")
+    ).filter(pl.col("decision") == "suggested_relabel")
     for row in candidates.select("crop_id", "relabel_target").iter_rows(named=True):
         api_label(
             state,

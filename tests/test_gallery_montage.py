@@ -1,8 +1,10 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 from PIL import Image
 
+from cleanup.gallery.judge import MontageVerdict
 from cleanup.gallery.montage import review_sheet
 from tests.conftest import write_image
 
@@ -25,3 +27,20 @@ def test_review_sheet_stacks_reference_section_above_review(tmp_path: Path) -> N
 
     assert with_refs.height > without.height
     assert without.width >= 4 * 50
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("mostly_not_a_logo", "not_a_logo"),  # seen live from Haiku 5.5
+        ("Not a logo", "not_a_logo"),
+        ("nearly_all_consistent", "consistent"),
+        ("unreadable", "unreadable"),
+        ("brand_match", "mixed"),  # a crop label: no montage meaning, keep the crops anyway
+    ],
+)
+def test_montage_summary_near_misses_keep_crop_verdicts(raw: str, expected: str) -> None:
+    verdict = MontageVerdict.model_validate(
+        {"cluster_verdict": raw, "cluster_suggested_brand": "", "tiles": []}
+    )
+    assert verdict.cluster_verdict == expected

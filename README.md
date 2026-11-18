@@ -183,6 +183,10 @@ grid refreshes with the progress bar while this filter is on. `review` writes th
 will judge to `review_queue.json` once at its start. The UI polls progress and spend every
 `CLEANUP_GALLERY_UI_REFRESH_SECONDS` (default 10).
 
+**Unit filter.** Type a review unit (montage) id, e.g. `devon-energy_c-1_00d7438397`, to see
+its crops in tile order, matching `montages/<unit>.jpg`; a partial id such as
+`devon-energy_c-1` shows every unit of that brand and cluster. Each card links its unit.
+
 **Second opinion.** Each card has a **↻ VLM** button (key `r`): pick any judge spec (offered:
 `CLEANUP_GALLERY_UI_JUDGES` plus judges already used in the run) and that model judges the one
 crop now, with the same sheet, prompt and retries as `review`. The verdict is appended to

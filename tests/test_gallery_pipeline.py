@@ -306,9 +306,18 @@ def test_ui_api_spend_counts_review_calls(settings: GallerySettings, reviewed: R
 
 
 INVALID_ANSWER: dict[str, Any] = {
-    "cluster_verdict": "brand_match",  # tile label in the cluster field
+    "cluster_verdict": "mixed",
     "cluster_suggested_brand": "",
-    "tiles": [],
+    # Crop verdicts stay strict (unlike the montage summary): an unknown label is retried.
+    "tiles": [
+        {
+            "tile": 1,
+            "verdict": "maybe",
+            "visible_text": "",
+            "suggested_brand": "",
+            "confidence": "high",
+        }
+    ],
 }
 
 
@@ -351,7 +360,7 @@ def test_retries_stop_at_the_limit(
 
     units: list[dict[str, Any]] = jsonl.read(paths.units)
     assert len(calls) == 2 * len(units)
-    assert all("cluster_verdict" in u["error"] for u in units)
+    assert all("maybe" in u["error"] for u in units)
 
 
 def test_auth_errors_are_not_retried(
@@ -656,3 +665,39 @@ def test_spend_counts_a_review_killed_before_logging(
         [{"ts": jsonl.now(), "started": progress["started"], "judge": "fake:judge", "usage": {}}],
     )
     assert len(api_spend(RunState(settings=settings, run="r1"))["recent"]) == 1  # not twice
+
+
+def test_unit_filter_shows_a_montage_in_tile_order(settings: GallerySettings) -> None:
+    packed: GallerySettings = settings.model_copy(update={"pack_small_groups": True})
+    paths: RunPaths = init_run(packed, "r1", Subset())
+    review.review_run(packed, "r1", review.ReviewScope())  # packing: several crops per unit
+    state = RunState(settings=packed, run="r1")
+    unit: dict[str, Any] = next(u for u in jsonl.read(paths.units) if len(u["crop_ids"]) > 1)
+    unit_id: str = unit["unit_id"]
+
+    exact: dict[str, Any] = api_items(state, {"unit": unit_id})
+    partial: dict[str, Any] = api_items(state, {"unit": unit_id.rsplit("_", 1)[0]})
+
+    assert [i["crop_id"] for i in exact["items"]] == unit["crop_ids"]  # tile 1, 2, ...
+    assert {i["crop_id"] for i in exact["items"]} <= {i["crop_id"] for i in partial["items"]}
+    assert all(i["judge_unit_id"].startswith(unit["brand"]) for i in partial["items"])
+    assert api_items(state, {"unit": "no-such-unit"})["total"] == 0
+    prefix: str = unit_id.rsplit("_", 1)[0]  # brand_c<cluster>
+    assert all(i["judge_unit_id"].startswith(f"{prefix}_") for i in partial["items"])
+
+
+def test_accept_relabels_respects_the_unit_filter(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
+    state = RunState(settings=settings, run="r1")
+    suggested: list[dict[str, Any]] = api_items(state, {"decision": "suggested_relabel"})["items"]
+    one_unit: str = suggested[0]["judge_unit_id"]
+
+    result: dict[str, Any] = api_accept_relabels(state, {"filters": {"unit": one_unit}})
+
+    assert (
+        result["accepted"]
+        == sum(i["judge_unit_id"] == one_unit for i in suggested)
+        < len(suggested)
+    )
