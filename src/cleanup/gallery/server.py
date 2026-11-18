@@ -20,6 +20,7 @@ import polars as pl
 import structlog
 
 from cleanup.gallery import jsonl
+from cleanup.gallery.brand_stats import brand_stats
 from cleanup.gallery.brands import load_catalog
 from cleanup.gallery.config import GallerySettings, RunPaths
 from cleanup.gallery.judge import TILE_LABELS
@@ -447,12 +448,16 @@ def make_handler(registry: RunRegistry) -> type[BaseHTTPRequestHandler]:
                 "/api/history": lambda: api_history(state, query.get("crop_id", "")),
                 "/api/changes": lambda: api_changes(state),
                 "/api/brand_changes": lambda: api_brand_changes(state),
+                "/api/brand_stats": lambda: api_brand_stats(state, query),
                 "/api/spend": lambda: api_spend(state),
                 "/api/progress": lambda: api_progress(state),
                 "/api/job": lambda: api_job(state),
             }
             if url.path in routes:
-                return self.send_json(routes[url.path]())
+                try:
+                    return self.send_json(routes[url.path]())
+                except ValueError as exc:
+                    return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             for prefix, root in (
                 ("/crops/", state.settings.crops_dir),
                 ("/montages/", state.paths.montages),
@@ -502,13 +507,16 @@ def make_handler(registry: RunRegistry) -> type[BaseHTTPRequestHandler]:
             status: HTTPStatus = HTTPStatus.OK,
             cache: bool = False,
         ) -> None:
-            """Raw response."""
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(data)))
-            self.send_header("Cache-Control", "max-age=3600" if cache else "no-store")
-            self.end_headers()
-            self.wfile.write(data)
+            """Raw response; a client that hung up mid-response is logged, not raised."""
+            try:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "max-age=3600" if cache else "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionResetError):
+                log.debug("http.client_gone", path=self.path)
 
     return Handler
 
@@ -591,6 +599,25 @@ def api_brand_changes(state: RunState) -> list[dict[str, Any]]:
     if not state.paths.brand_changes.exists():
         return []
     return pl.read_csv(state.paths.brand_changes).to_dicts()
+
+
+def api_brand_stats(state: RunState, query: dict[str, str]) -> dict[str, Any]:
+    """Overall VLM-vs-annotation numbers, the top brands by `sort`, and label confusions."""
+    try:
+        top: int = min(MAX_PAGE_SIZE, max(1, int(query.get("top") or 20)))
+        min_judged: int = max(0, int(query.get("min_judged") or 20))
+        offset: int = max(0, int(query.get("offset") or 0))
+    except ValueError as exc:
+        raise ValueError("top, min_judged and offset must be integers") from exc
+    return brand_stats(
+        items=state.items,
+        human=human_labels(state),
+        sort=query.get("sort") or "disagree_rate",
+        top=top,
+        min_judged=min_judged,
+        order=query.get("order") or "desc",
+        offset=offset,
+    )
 
 
 def api_progress(state: RunState) -> dict[str, Any]:
