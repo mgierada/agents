@@ -24,7 +24,9 @@ from cleanup.gallery.brands import load_catalog
 from cleanup.gallery.config import GallerySettings, RunPaths
 from cleanup.gallery.judge import TILE_LABELS
 from cleanup.gallery.pricing import spend_report
-from cleanup.gallery.resolve import Progress, no_progress, resolve_run
+from cleanup.gallery.progress import Progress, no_progress, scaled
+from cleanup.gallery.refine import refine_gallery, refined_dir
+from cleanup.gallery.resolve import resolve_run
 from cleanup.gallery.review import judge_one
 from cleanup.gallery.run import load_run
 
@@ -63,40 +65,54 @@ ITEM_COLUMNS: tuple[str, ...] = (
 
 # Share of a UI resolve spent in resolve_run; the rest reloads the UI tables (~5 s on 1M crops).
 RESOLVE_SHARE = 0.9
+# Share of "accept relabels" spent writing the labels (one batch); the rest is the resolve.
+ACCEPT_SHARE = 0.05
+# Labels appended per write while accepting relabels (one progress step each).
+ACCEPT_CHUNK = 5_000
 
 
 @dataclass
-class ResolveJob:
-    """A resolve running in the background for one run, polled by the UI for its progress."""
+class Job:
+    """A long step (resolve, accept relabels, refine) running in the background for one run.
 
+    One at a time per run, since all of them read or write the run's decisions. The UI polls
+    `api_job` for its progress.
+    """
+
+    kind: str = ""
     status: str = "idle"  # idle | running | done | error
     stage: str = ""
     fraction: float = 0.0
     started: str | None = None
     finished: str | None = None
     error: str | None = None
-    summary: dict[str, Any] | None = None
-    accepted: int | None = None  # relabels accepted before this resolve, if any
+    result: dict[str, Any] | None = None
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def snapshot(self) -> dict[str, Any]:
         """JSON-safe state, with the progress as a whole percentage."""
         with self.lock:
             return {
+                "kind": self.kind,
                 "status": self.status,
                 "stage": self.stage,
                 "percent": round(100 * self.fraction),
                 "started": self.started,
                 "finished": self.finished,
                 "error": self.error,
-                "summary": self.summary,
-                "accepted": self.accepted,
+                "result": self.result,
             }
 
     def update(self, stage: str, fraction: float) -> None:
-        """Progress callback for resolve_run."""
+        """Progress callback for the running step."""
         with self.lock:
             self.stage, self.fraction = stage, fraction
+
+    @property
+    def running(self) -> bool:
+        """True while a step runs."""
+        with self.lock:
+            return self.status == "running"
 
 
 @dataclass
@@ -120,7 +136,7 @@ class RunState:
     # Bytes of judgements.jsonl already folded into `verdicts`.
     judged_offset: int = field(init=False, default=0)
     lock: threading.RLock = field(init=False, default_factory=threading.RLock, repr=False)
-    resolve_job: ResolveJob = field(init=False, default_factory=ResolveJob)
+    job: Job = field(init=False, default_factory=Job)
 
     def __post_init__(self) -> None:
         """Load the run's tables."""
@@ -433,7 +449,7 @@ def make_handler(registry: RunRegistry) -> type[BaseHTTPRequestHandler]:
                 "/api/brand_changes": lambda: api_brand_changes(state),
                 "/api/spend": lambda: api_spend(state),
                 "/api/progress": lambda: api_progress(state),
-                "/api/resolve_status": lambda: api_resolve_status(state),
+                "/api/job": lambda: api_job(state),
             }
             if url.path in routes:
                 return self.send_json(routes[url.path]())
@@ -457,11 +473,13 @@ def make_handler(registry: RunRegistry) -> type[BaseHTTPRequestHandler]:
                 if path == "/api/label":
                     return self.send_json(api_label(state, body))
                 if path == "/api/accept_relabels":
-                    return self.send_json(api_accept_relabels(state, body, start_resolve))
+                    return self.send_json(start_accept_relabels(state, body))
                 if path == "/api/rejudge":
                     return self.send_json(api_rejudge(state, body))
                 if path == "/api/resolve":
                     return self.send_json(start_resolve(state, body))
+                if path == "/api/refine":
+                    return self.send_json(start_refine(state, body))
             except ValueError as exc:
                 return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
             self.send_error(HTTPStatus.NOT_FOUND)
@@ -530,6 +548,7 @@ def api_meta(state: RunState) -> dict[str, Any]:
         "refresh_seconds": state.settings.ui_refresh_seconds,
         "judges": judge_choices(state),
         "default_judge": state.settings.judge,
+        "gallery_name": state.settings.gallery_dir.resolve().name,
     }
 
 
@@ -597,57 +616,75 @@ def api_label(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
     suggested: str = str(body.get("suggested_brand") or "").strip()
     if verdict == "different_brand" and not suggested:
         raise ValueError("different_brand needs suggested_brand")
-    judge_row: dict[str, Any] = state.items.filter(pl.col("crop_id") == crop_id).row(0, named=True)
-    previous: dict[str, Any] | None = human_labels(state).get(crop_id)
-    event: dict[str, Any] = {
-        "crop_id": crop_id,
-        "ts": jsonl.now(),
-        "verdict": verdict,
-        "suggested_brand": suggested if verdict == "different_brand" else "",
-        "note": str(body.get("note") or ""),
-        "brand": judge_row["brand"],
-        "judge_verdict": judge_row["judge_verdict"],
-        "previous_verdict": previous["verdict"] if previous else None,
-        "previous_suggested_brand": previous.get("suggested_brand") if previous else None,
-    }
+    item: dict[str, Any] = state.items.filter(pl.col("crop_id") == crop_id).row(0, named=True)
+    event: dict[str, Any] = label_event(
+        item=item,
+        verdict=verdict,
+        suggested_brand=suggested,
+        note=str(body.get("note") or ""),
+        previous=human_labels(state).get(crop_id),
+    )
     jsonl.append(state.paths.events, [event])
     return event
 
 
+def label_event(
+    item: dict[str, Any],
+    verdict: str | None,
+    suggested_brand: str,
+    note: str,
+    previous: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """One events.jsonl row: the label, the crop's brand and judge verdict, the previous label."""
+    return {
+        "crop_id": item["crop_id"],
+        "ts": jsonl.now(),
+        "verdict": verdict,
+        "suggested_brand": suggested_brand if verdict == "different_brand" else "",
+        "note": note,
+        "brand": item["brand"],
+        "judge_verdict": item["judge_verdict"],
+        "previous_verdict": previous["verdict"] if previous else None,
+        "previous_suggested_brand": previous.get("suggested_brand") if previous else None,
+    }
+
+
 def api_accept_relabels(
-    state: RunState,
-    body: dict[str, Any],
-    then_resolve: Callable[[RunState, dict[str, Any]], dict[str, Any]] | None = None,
+    state: RunState, body: dict[str, Any], progress: Progress = no_progress
 ) -> dict[str, Any]:
     """Confirm every `suggested_relabel` matching the UI's filters, then re-resolve.
 
-    `then_resolve` runs the resolve (default: `api_resolve`, inline; the server starts it in
-    the background instead) and its result is returned as `summary`. Each acceptance is an
-    ordinary human label (different_brand + the judge's target, note `accepted (bulk)`)
-    appended to events.jsonl, so any crop can be changed back individually.
+    Each acceptance is an ordinary human label (different_brand + the judge's target, note
+    `accepted (bulk)`) appended to events.jsonl, so any crop can be changed back individually.
+    Labels are written in batches (one read of events.jsonl, not one per crop).
     """
     if "decision" not in state.items.columns:
         raise ValueError("run Resolve first")
-    if state.resolve_job.snapshot()["status"] == "running":
-        raise ValueError("a resolve is running; accept relabels when it is done")
     filters: dict[str, str] = {k: str(v) for k, v in (body.get("filters") or {}).items()}
     candidates: pl.DataFrame = filter_unit(
         state, filter_items(state.items, human_labels(state), filters), filters.get("unit", "")
     ).filter(pl.col("decision") == "suggested_relabel")
-    for row in candidates.select("crop_id", "relabel_target").iter_rows(named=True):
-        api_label(
-            state,
-            {
-                "crop_id": row["crop_id"],
-                "verdict": "different_brand",
-                "suggested_brand": row["relabel_target"],
-                "note": "accepted (bulk)",
-            },
+    previous: dict[str, dict[str, Any]] = human_labels(state)
+    events: list[dict[str, Any]] = [
+        label_event(
+            item=row,
+            verdict="different_brand",
+            suggested_brand=row["relabel_target"],
+            note="accepted (bulk)",
+            previous=previous.get(row["crop_id"]),
         )
-    summary: dict[str, Any] = (then_resolve or api_resolve)(
-        state, body | {"accepted": candidates.height}
+        for row in candidates.select(
+            "crop_id", "relabel_target", "brand", "judge_verdict"
+        ).iter_rows(named=True)
+    ]
+    for start in range(0, len(events), ACCEPT_CHUNK):
+        jsonl.append(state.paths.events, events[start : start + ACCEPT_CHUNK])
+        done: float = min(1.0, (start + ACCEPT_CHUNK) / len(events))
+        progress(f"accepting {len(events):,} relabels", ACCEPT_SHARE * done)
+    summary: dict[str, Any] = api_resolve(
+        state, body, progress=scaled(progress=progress, start=ACCEPT_SHARE, end=1.0)
     )
-    return {"accepted": candidates.height, "summary": summary}
+    return {"accepted": len(events), "summary": summary}
 
 
 def judge_choices(state: RunState) -> list[str]:
@@ -678,12 +715,12 @@ def api_resolve(
 ) -> dict[str, Any]:
     """Re-run resolve (human labels included) and reload the tables."""
     resolve_run(
-        state.settings,
-        state.run,
+        settings=state.settings,
+        run=state.run,
         judge=body.get("judge") or None,
         min_confidence=body.get("min_confidence") or "low",
         trust_judge_relabels=bool(body.get("trust_judge_relabels")),
-        progress=lambda stage, fraction: progress(stage, RESOLVE_SHARE * fraction),
+        progress=scaled(progress=progress, start=0.0, end=RESOLVE_SHARE),
     )
     progress("reloading UI", RESOLVE_SHARE)
     state.reload()
@@ -691,39 +728,72 @@ def api_resolve(
     return json.loads(state.paths.summary.read_text())
 
 
-def start_resolve(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
-    """Start `api_resolve` in a background thread; poll `api_resolve_status` for progress.
+def api_refine(
+    state: RunState, body: dict[str, Any], progress: Progress = no_progress
+) -> dict[str, Any]:
+    """Write the refined gallery `body["name"]` from this run; returns its refine.json."""
+    target: Path = refine_gallery(
+        settings=state.settings, run=state.run, name=str(body.get("name") or ""), progress=progress
+    )
+    return {"gallery": str(target)} | json.loads((target / "refine.json").read_text())
 
-    One resolve per run at a time: ValueError while one is running.
+
+def start_resolve(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
+    """Resolve in the background."""
+    return start_job(state, "resolve", lambda progress: api_resolve(state, body, progress))
+
+
+def start_accept_relabels(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
+    """Accept suggested relabels (then resolve) in the background."""
+    if "decision" not in state.items.columns:
+        raise ValueError("run Resolve first")
+    return start_job(
+        state, "accept relabels", lambda progress: api_accept_relabels(state, body, progress)
+    )
+
+
+def start_refine(state: RunState, body: dict[str, Any]) -> dict[str, Any]:
+    """Refine in the background; a bad or taken name is rejected before starting."""
+    try:
+        refined_dir(source=state.settings.gallery_dir.resolve(), name=str(body.get("name") or ""))
+    except FileExistsError as exc:
+        raise ValueError(str(exc)) from exc
+    return start_job(state, "refine", lambda progress: api_refine(state, body, progress))
+
+
+def start_job(
+    state: RunState, kind: str, work: Callable[[Progress], dict[str, Any]]
+) -> dict[str, Any]:
+    """Run `work(progress)` in a background thread as the run's job; poll `api_job`.
+
+    ValueError while another job of the run is running.
     """
-    job: ResolveJob = state.resolve_job
+    job: Job = state.job
     with job.lock:
         if job.status == "running":
-            raise ValueError("a resolve is already running for this run")
-        job.status, job.stage, job.fraction = "running", "starting", 0.0
-        job.started, job.finished, job.error, job.summary = jsonl.now(), None, None, None
-        job.accepted = body.get("accepted")
-    threading.Thread(target=run_resolve_job, args=(state, body), daemon=True).start()
+            raise ValueError(f"{job.kind} is already running for this run; wait for it")
+        job.kind, job.status, job.stage, job.fraction = kind, "running", "starting", 0.0
+        job.started, job.finished, job.error, job.result = jsonl.now(), None, None, None
+    threading.Thread(target=run_job, args=(job, work), daemon=True).start()
     return job.snapshot()
 
 
-def run_resolve_job(state: RunState, body: dict[str, Any]) -> None:
-    """Thread body of `start_resolve`: run it and record the outcome on the job."""
-    job: ResolveJob = state.resolve_job
+def run_job(job: Job, work: Callable[[Progress], dict[str, Any]]) -> None:
+    """Thread body of `start_job`: run it and record the outcome on the job."""
     try:
-        summary: dict[str, Any] = api_resolve(state, body, progress=job.update)
+        result: dict[str, Any] = work(job.update)
     except Exception as exc:  # noqa: BLE001 - shown in the UI instead of killing the thread
-        log.exception("resolve_failed", run=state.run)
+        log.exception("job_failed", kind=job.kind)
         with job.lock:
-            job.status, job.error, job.finished = "error", repr(exc), jsonl.now()
+            job.status, job.error, job.finished = "error", str(exc), jsonl.now()
         return
     with job.lock:
-        job.status, job.summary, job.finished = "done", summary, jsonl.now()
+        job.status, job.result, job.fraction, job.finished = "done", result, 1.0, jsonl.now()
 
 
-def api_resolve_status(state: RunState) -> dict[str, Any]:
-    """Progress of the run's current or last UI resolve."""
-    return state.resolve_job.snapshot()
+def api_job(state: RunState) -> dict[str, Any]:
+    """Progress of the run's current or last background job."""
+    return state.job.snapshot()
 
 
 def serve(settings: GallerySettings, run: str, port: int) -> None:

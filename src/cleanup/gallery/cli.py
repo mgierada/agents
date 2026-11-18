@@ -4,6 +4,7 @@ init       pick crops (whole gallery, subset or calibration sample), flags, prio
 review     VLM verdicts on montages (Claude or Ollama)
 resolve    flags + judge + your labels -> decisions, before/after per brand
 calibrate  judge and flag precision against your labels
+refine     new gallery dir from the resolved decisions (keep + relabel), kNN left to highfive
 ui         label crops, compare before/after, browse the change log
 """
 
@@ -133,13 +134,13 @@ def review(
     typer.echo(f"usage: {usage}")
 
 
-RESOLVE_BAR = "{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]"
+PERCENT_BAR = "{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]"
 
 
 def show_progress(bar: tqdm, stage: str, fraction: float) -> None:
     """Move a 0-100 tqdm bar to `fraction`, labelled with the stage."""
-    bar.set_description_str(stage, refresh=False)
-    bar.update(round(100 * fraction) - bar.n)
+    bar.set_description_str(desc=stage, refresh=False)
+    bar.update(n=round(number=100 * fraction) - bar.n)
 
 
 @app.command()
@@ -168,7 +169,7 @@ def resolve(
         gallery_dir=gallery_dir, runs_dir=runs_dir, target_list=target_list, aliases=aliases
     )
     configure_logging()
-    with tqdm(total=100, unit="%", bar_format=RESOLVE_BAR) as bar:
+    with tqdm(total=100, unit="%", bar_format=PERCENT_BAR) as bar:
         resolve_run(
             settings,
             run,
@@ -220,6 +221,38 @@ def backfill_spend_cmd(
         usd: float | None = estimate_usd(entry["judge"], entry["usage"])
         cost: str = "unpriced" if usd is None else f"~${usd:.2f}"
         typer.echo(f"{entry['judge']}: {entry['units']:,} units, {entry['crops']:,} crops, {cost}")
+
+
+@app.command()
+def refine(
+    run: Run,
+    name: Annotated[str, typer.Option(help="New gallery dir name, created next to --gallery-dir")],
+    gallery_dir: GalleryDir = None,
+    runs_dir: RunsDir = None,
+    target_list: TargetList = None,
+    aliases: Aliases = None,
+) -> None:
+    """Step 6: a refined gallery (manifest, sliced embeddings, crops symlink) from RUN.
+
+    Keeps crops resolved as keep or relabel, under their new brand. Recompute the kNN
+    outputs with the highfive-models command printed at the end.
+    """
+    from cleanup.gallery.refine import REFINE_NAME, refine_gallery
+
+    settings: GallerySettings = settings_from(
+        gallery_dir=gallery_dir, runs_dir=runs_dir, target_list=target_list, aliases=aliases
+    )
+    configure_logging()
+    with tqdm(total=100, unit="%", bar_format=PERCENT_BAR) as bar:
+        target: Path = refine_gallery(
+            settings=settings,
+            run=run,
+            name=name,
+            progress=lambda stage, fraction: show_progress(bar, stage, fraction),
+        )
+    info: dict[str, Any] = json.loads((target / REFINE_NAME).read_text())
+    typer.echo(f"{target}: {info['n_refined']:,} of {info['n_source']:,} crops")
+    typer.echo(f"next (in highfive-models): {info['analyze_command']}")
 
 
 @app.command()

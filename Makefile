@@ -21,7 +21,7 @@ GARGS = --gallery-dir $(GALLERY) --target-list $(TARGETS)
 
 .DEFAULT_GOAL := help
 .PHONY: help install run dry-run run-vlm ollama-serve ollama-pull graph stats lint format typecheck test check clean clean-output \
-	gallery-calib gallery-review gallery-resolve gallery-calibrate gallery-plot gallery-ui
+	gallery-calib gallery-review gallery-resolve gallery-calibrate gallery-plot gallery-ui gallery-refine
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -61,6 +61,9 @@ gallery-resolve: ## Gallery: decisions + before/after for RUN
 
 gallery-calibrate: ## Gallery: judge/flag precision vs your labels in RUN
 	uv run cleanup gallery calibrate --run $(RUN) $(GARGS)
+
+gallery-refine: ## Gallery: new gallery dir NAME from RUN's resolved decisions
+	uv run cleanup gallery refine --run $(RUN) --name $(NAME) $(GARGS)
 
 gallery-plot: ## Gallery: calibration charts (PNG) into RUN/plots/
 	uv run cleanup gallery plot --run $(RUN) $(GARGS)

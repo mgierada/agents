@@ -100,6 +100,7 @@ VLM as judge, not an open-ended agent. Inputs are never modified; every run writ
 | 5 | `resolve` | `decisions.parquet`, `brand_changes.csv`, `new_class_candidates.csv`, `summary.json` |
 | 1 | `calibrate` | `calibration.json` (judge + flag precision vs your labels) |
 | 1 | `plot` | `plots/*.png`: confusion heatmaps, precision/recall, accuracy, flag precision |
+| 6 | `refine` | new gallery dir `--name` next to the source (see **Refine**) |
 | 8 | `ui` | labels and overrides appended to `events.jsonl` |
 
 Typical loop:
@@ -203,9 +204,33 @@ priced. Prices drift, so check AWS / Anthropic before relying on totals.
 **Resolve.** Your label > hard flag > judge verdict > `pending`. A suggested brand on the target
 list is a `relabel`; one that isn't is dropped from the gallery and listed in
 `new_class_candidates.csv` for you to decide on. No class ids are invented. Resolve shows its
-progress in % (≈45 s on 1M crops): the CLI as a tqdm bar, the UI on the Resolve button. The UI
-runs it in the background (one per run; status at `/api/resolve_status`), so other tabs and
-a page reload keep showing it.
+progress in % (≈45 s on 1M crops): the CLI as a tqdm bar, the UI in a bar under the header.
+In the UI, Resolve, **Accept suggested relabels** and **Refine gallery** run in the background
+(one at a time per run; status at `/api/job`), so other tabs and a page reload keep showing
+the bar.
+
+**Refine.** `cleanup gallery refine --run full --name <new_gallery>` (or
+`make gallery-refine RUN=full NAME=...`, or **Refine gallery** in the UI) writes `<new_gallery>/` next to the source gallery, in
+the layout highfive-models' `logo-audit` leaves after its crops + embed stages:
+
+- `manifest.parquet`: only crops resolved `keep` or `relabel` (pending, suggested relabels,
+  dropped, unrecognisable and not-a-logo crops are left out), `brand` = brand after resolve,
+  source row order; `crop_path` moved from `/<source>/crops/` to `/<new_gallery>/crops/`.
+- `emb_<backbone>.npy`: the matching rows of every source embedding file (no re-embedding).
+- `crops` → relative symlink to the source's `crops/` (nothing copied).
+- `refine.json`: source, run, resolve settings, counts, and the command for the next step.
+
+The kNN outputs (`summary.json`, `analysis.parquet` with `suspect`/`cluster`, suspects,
+duplicates, contact sheets, brand scaling) depend on the new labels, so recompute them with
+highfive-models on the training host (where `crop_path` resolves), using the printed command:
+
+```bash
+uv run highfive_models/data_processing/fiftyone/main.py logo-audit <batch> \
+    --stage analyze --output-dir <host path>/<new_gallery> --backbones siglip2
+```
+
+Refine needs a resolved run over the whole gallery (e.g. `full`), refuses an existing
+`--name`, and warns when verdicts or labels changed after the last resolve.
 
 ```mermaid
 ---

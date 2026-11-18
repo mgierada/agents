@@ -141,9 +141,9 @@
       gap: 10px;
     }
 
-    #progress { display: flex; gap: 10px; align-items: center; padding: 6px 16px; border-bottom: 1px solid var(--line); }
-    #progress.hidden { display: none; }
-    #progress progress { flex: 0 0 280px; height: 12px; accent-color: var(--accent); }
+    #progress, #job { display: flex; gap: 10px; align-items: center; padding: 6px 16px; border-bottom: 1px solid var(--line); }
+    #progress.hidden, #job.hidden { display: none; }
+    #progress progress, #job progress { flex: 0 0 280px; height: 12px; accent-color: var(--accent); }
     #progress .warn { color: var(--warn); }
 
     .card {
@@ -337,7 +337,11 @@
         <option>high</option>
       </select></label>
     <button class="act" id="resolve" title="Recompute decisions from flags, judge and your labels">Resolve</button>
+    <button class="act" id="refine" title="New gallery dir (manifest, embeddings, crops link) from this run's keep + relabel decisions">Refine gallery</button>
   </header>
+  <div id="job" class="hidden" title="Background step of this run (resolve, accept relabels, refine)">
+    <b id="job-kind"></b><progress id="job-bar" max="100" value="0"></progress><span id="job-text" class="stats"></span>
+  </div>
   <div id="progress" class="hidden" title="Live state of cleanup gallery review for this run (review_progress.json)">
     <b>Review</b><progress id="progress-bar" max="1" value="0"></progress><span id="progress-text" class="stats"></span>
   </div>
@@ -451,8 +455,8 @@
       return url.pathname + url.search;
     };
 
-    const RESOLVE_POLL_MS = 500;
-    const RESOLVE_TITLE = $("resolve").title;
+    const JOB_POLL_MS = 500;
+    const JOB_BUTTONS = ["resolve", "refine", "accept-relabels"];
 
     async function api(path, body) {
       const res = await fetch(withRun(path), body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
@@ -791,41 +795,62 @@
       if (!n) return;
       const scope = Object.keys(filters()).length ? "matching the current filters" : "in this run";
       if (!confirm(`Accept ${n} suggested relabel(s) ${scope}?\n\nEach crop is labelled "different brand" with the judge's suggested brand (logged as "accepted (bulk)"; change any back with its buttons). Then Resolve runs.`)) return;
-      const btn = $("accept-relabels"); btn.disabled = true; btn.textContent = "Accepting…";
-      try {await api("/api/accept_relabels", {filters: filters(), min_confidence: $("minconf").value}); await watchResolve(true);}
+      try {await api("/api/accept_relabels", {filters: filters(), min_confidence: $("minconf").value}); await watchJob(true);}
       catch (err) {alert(err.message); countSuggested();}
     };
     $("resolve").onclick = async () => {
-      try {await api("/api/resolve", {min_confidence: $("minconf").value}); await watchResolve(true);}
+      try {await api("/api/resolve", {min_confidence: $("minconf").value}); await watchJob(true);}
+      catch (err) {alert(err.message);}
+    };
+    $("refine").onclick = async () => {
+      if (!meta?.has_decisions) {alert("Run Resolve first."); return;}
+      const day = new Date().toISOString().slice(0, 10);
+      const name = prompt(
+        `New gallery dir name (created next to ${meta.gallery_name}).\n\nKeeps this run's keep + relabel crops under their new brand; embeddings sliced, crops linked. Then recompute kNN with highfive-models (command shown at the end).`,
+        `${meta.gallery_name}__refined-${meta.run}-${day}`);
+      if (!name) return;
+      try {await api("/api/refine", {name: name.trim()}); await watchJob(true);}
       catch (err) {alert(err.message);}
     };
 
-    // Resolve runs in the background on the server; poll its progress until it ends.
-    let watchingResolve = false;
-    async function watchResolve(started = false) {
-      if (watchingResolve) return;
-      watchingResolve = true;
-      const btn = $("resolve");
-      let sawRunning = started;  // on page load, a resolve finished earlier needs no reload
+    // Resolve, accept relabels and refine run in the background on the server (one per run);
+    // poll the job until it ends, then refresh what it changed.
+    let watchingJob = false;
+    async function watchJob(started = false) {
+      if (watchingJob) return;
+      watchingJob = true;
+      let sawRunning = started;  // on page load, a job finished earlier needs nothing
       try {
         for (;;) {
-          const job = await api("/api/resolve_status");
+          const job = await api("/api/job");
           if (job.status !== "running") {
-            if (!sawRunning) return;
-            if (job.status === "error") alert(`Resolve failed: ${job.error}`);
-            if (job.status === "done") {await loadMeta(); await loadItems();}
+            if (sawRunning) await jobEnded(job);
             return;
           }
           sawRunning = true;
-          btn.disabled = true;
-          btn.textContent = `Resolving ${job.percent}%`;
-          btn.title = `${job.stage} (started ${job.started})`;
-          await new Promise((r) => setTimeout(r, RESOLVE_POLL_MS));
+          for (const id of JOB_BUTTONS) $(id).disabled = true;
+          $("job").classList.remove("hidden");
+          $("job-kind").textContent = job.kind;
+          $("job-bar").value = job.percent;
+          $("job-text").textContent = `${job.percent}% · ${job.stage} · started ${job.started.slice(11, 19)}`;
+          await new Promise((r) => setTimeout(r, JOB_POLL_MS));
         }
       } finally {
-        watchingResolve = false;
-        btn.disabled = false; btn.textContent = "Resolve"; btn.title = RESOLVE_TITLE;
+        watchingJob = false;
+        $("job").classList.add("hidden");
+        $("resolve").disabled = false; $("refine").disabled = false;
+        countSuggested();
       }
+    }
+
+    async function jobEnded(job) {
+      if (job.status === "error") {alert(`${job.kind} failed: ${job.error}`); return;}
+      if (job.kind === "refine") {
+        const r = job.result;
+        alert(`Refined gallery written:\n${r.gallery}\n${r.n_refined.toLocaleString()} of ${r.n_source.toLocaleString()} crops, ${r.n_brands} brands.\n\nNext, in highfive-models (training host):\n${r.analyze_command}`);
+        return;
+      }
+      await loadMeta(); await loadItems();
     }
     document.addEventListener("keydown", (e) => {
       if ($("dlg").open || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
@@ -842,7 +867,7 @@
       else if (KEYS[e.key] && items[sel]) {e.preventDefault(); label(sel, KEYS[e.key]);}
     });
 
-    (async () => {initLayout(); loadRuns(); await loadMeta(); markRun(); poll(); setInterval(poll, 1000 * (meta.refresh_seconds || 10)); await initFilters(); await loadItems(); watchResolve();})();
+    (async () => {initLayout(); loadRuns(); await loadMeta(); markRun(); poll(); setInterval(poll, 1000 * (meta.refresh_seconds || 10)); await initFilters(); await loadItems(); watchJob();})();
   </script>
 </body>
 

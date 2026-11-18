@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 import pytest
 from langchain_core.messages import BaseMessage
@@ -22,6 +23,7 @@ from cleanup.gallery.brands import BrandCatalog
 from cleanup.gallery.calibrate import calibrate_run
 from cleanup.gallery.config import GallerySettings, RunPaths
 from cleanup.gallery.judge import MontageVerdict, TileLabel, TileVerdict
+from cleanup.gallery.refine import refine_gallery
 from cleanup.gallery.resolve import decide, resolve_run
 from cleanup.gallery.run import init_run
 from cleanup.gallery.server import (
@@ -29,13 +31,15 @@ from cleanup.gallery.server import (
     RunState,
     api_accept_relabels,
     api_items,
+    api_job,
     api_label,
     api_meta,
     api_progress,
     api_rejudge,
-    api_resolve_status,
     api_runs,
     api_spend,
+    start_accept_relabels,
+    start_refine,
     start_resolve,
 )
 from cleanup.gallery.subset import Subset
@@ -721,10 +725,10 @@ def test_resolve_reports_rising_progress_up_to_done(
     assert [s for s, _ in seen].count("deciding") > 1  # per-crop steps, not just stage starts
 
 
-def wait_for_resolve(state: RunState, timeout: float = 30.0) -> dict[str, Any]:
-    """Poll the UI resolve job like the page does, until it leaves `running`."""
+def wait_for_job(state: RunState, timeout: float = 30.0) -> dict[str, Any]:
+    """Poll the run's background job like the page does, until it leaves `running`."""
     deadline: float = time.monotonic() + timeout
-    while (job := api_resolve_status(state))["status"] == "running":
+    while (job := api_job(state))["status"] == "running":
         assert time.monotonic() < deadline, job
         time.sleep(0.05)
     return job
@@ -734,20 +738,21 @@ def test_ui_resolve_runs_in_background_and_reports_percent(
     settings: GallerySettings, reviewed: RunPaths
 ) -> None:
     state = RunState(settings=settings, run="r1")
-    assert api_resolve_status(state)["status"] == "idle"
+    assert api_job(state)["status"] == "idle"
 
     started: dict[str, Any] = start_resolve(state, {"min_confidence": "low"})
-    job: dict[str, Any] = wait_for_resolve(state)
+    job: dict[str, Any] = wait_for_job(state)
 
-    assert started["status"] == "running"
+    assert (started["kind"], started["status"]) == ("resolve", "running")
     assert (job["status"], job["percent"], job["error"]) == ("done", 100, None)
-    assert job["summary"]["n_crops"] == state.items.height
+    assert job["result"]["n_crops"] == state.items.height
     assert "decision" in state.items.columns  # tables reloaded
 
 
-def test_ui_resolve_rejects_a_second_start_and_reports_errors(
+def test_ui_job_rejects_a_second_start_and_reports_errors(
     settings: GallerySettings, reviewed: RunPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
     state = RunState(settings=settings, run="r1")
     release = threading.Event()
 
@@ -757,37 +762,154 @@ def test_ui_resolve_rejects_a_second_start_and_reports_errors(
 
     monkeypatch.setattr("cleanup.gallery.server.resolve_run", blocked)
     start_resolve(state, {})
-    with pytest.raises(ValueError, match="already running"):
-        start_resolve(state, {})
+    with pytest.raises(ValueError, match="resolve is already running"):
+        start_accept_relabels(state, {"filters": {}})
     release.set()
 
-    job: dict[str, Any] = wait_for_resolve(state)
+    job: dict[str, Any] = wait_for_job(state)
 
     assert job["status"] == "error"
     assert "disk full" in job["error"]
+    assert jsonl.read(reviewed.events) == []  # nothing accepted while the resolve ran
 
 
-def test_accept_relabels_waits_for_a_running_resolve(
+def test_ui_accept_relabels_reports_progress_and_resolves(
     settings: GallerySettings, reviewed: RunPaths
 ) -> None:
     resolve_run(settings, "r1", judge=None, min_confidence="low")
     state = RunState(settings=settings, run="r1")
-    state.resolve_job.status = "running"
+    seen: list[tuple[str, float]] = []
 
-    with pytest.raises(ValueError, match="resolve is running"):
-        api_accept_relabels(state, {"filters": {}})
-    assert jsonl.read(reviewed.events) == []
+    result: dict[str, Any] = api_accept_relabels(
+        state, {"filters": {}}, progress=lambda *a: seen.append(a)
+    )
 
-
-def test_ui_accept_relabels_resolves_in_background(
-    settings: GallerySettings, reviewed: RunPaths
-) -> None:
-    resolve_run(settings, "r1", judge=None, min_confidence="low")
-    state = RunState(settings=settings, run="r1")
-
-    result: dict[str, Any] = api_accept_relabels(state, {"filters": {}}, start_resolve)
-    job: dict[str, Any] = wait_for_resolve(state)
-
-    assert result["accepted"] == job["accepted"] == 2
-    assert job["status"] == "done"
+    assert result["accepted"] == 2
+    assert seen[0][0] == "accepting 2 relabels"
+    assert [f for _, f in seen] == sorted(f for _, f in seen)
+    assert seen[-1] == ("reloading UI", 1.0)
     assert api_items(state, {"decision": "suggested_relabel"})["total"] == 0
+
+
+def test_ui_accept_relabels_runs_in_background(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
+    state = RunState(settings=settings, run="r1")
+
+    start_accept_relabels(state, {"filters": {}})
+    job: dict[str, Any] = wait_for_job(state)
+
+    assert (job["kind"], job["status"], job["result"]["accepted"]) == (
+        "accept relabels",
+        "done",
+        2,
+    )
+
+
+def add_manifest_and_embeddings(gallery_dir: Path) -> np.ndarray:
+    """What highfive's crops/embed stages leave: manifest.parquet + emb_siglip2.npy."""
+    analysis: pl.DataFrame = pl.read_parquet(gallery_dir / "analysis.parquet")
+    manifest: pl.DataFrame = analysis.select(
+        "crop_id", "source_image", "video_group", "brand", "box_w", "box_h", "area_fraction"
+    ).with_columns(
+        crop_path=pl.lit(f"/host/{gallery_dir.name}/crops/") + pl.col("crop_id") + ".jpg"
+    )
+    manifest.write_parquet(gallery_dir / "manifest.parquet")
+    emb: np.ndarray = np.arange(manifest.height * 4, dtype=np.float16).reshape(-1, 4)
+    np.save(gallery_dir / "emb_siglip2.npy", emb)
+    return emb
+
+
+def test_refine_writes_confirmed_crops_with_new_brands_and_aligned_embeddings(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    emb: np.ndarray = add_manifest_and_embeddings(settings.gallery_dir)
+    api_label(
+        RunState(settings=settings, run="r1"),
+        {"crop_id": "vidD-0_0", "verdict": "different_brand", "suggested_brand": "toyota"},
+    )
+    decisions: pl.DataFrame = resolve_run(settings, "r1", judge=None, min_confidence="low")
+
+    target: Path = refine_gallery(settings, "r1", "refined")
+
+    manifest: pl.DataFrame = pl.read_parquet(target / "manifest.parquet")
+    kept: pl.DataFrame = decisions.filter(pl.col("decision").is_in(["keep", "relabel"]))
+    assert manifest["crop_id"].to_list() == kept["crop_id"].to_list()  # source order
+    assert dict(manifest.select("crop_id", "brand").iter_rows())["vidD-0_0"] == "toyota"
+    source_ids: list[str] = pl.read_parquet(settings.gallery_dir / "manifest.parquet")[
+        "crop_id"
+    ].to_list()
+    rows: list[int] = [source_ids.index(c) for c in manifest["crop_id"]]
+    np.testing.assert_array_equal(np.load(target / "emb_siglip2.npy"), emb[rows])
+    assert (target / "crops" / f"{manifest['crop_id'][0]}.jpg").is_file()  # via symlink
+    assert manifest["crop_path"][0] == f"/host/refined/crops/{manifest['crop_id'][0]}.jpg"
+    info: dict[str, Any] = json.loads((target / "refine.json").read_text())
+    assert (info["run"], info["n_refined"], info["backbones"]) == ("r1", kept.height, ["siglip2"])
+    assert (
+        "--stage analyze --output-dir /host/refined --backbones siglip2"
+        in (info["analyze_command"])
+    )
+    assert not (target / "analysis.parquet").exists()  # kNN outputs: highfive's analyze stage
+
+
+def test_refine_refuses_unsafe_or_existing_names_and_unresolved_runs(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    add_manifest_and_embeddings(settings.gallery_dir)
+    with pytest.raises(FileNotFoundError, match="resolve"):
+        refine_gallery(settings, "r1", "refined")
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
+    with pytest.raises(ValueError, match="plain dir name"):
+        refine_gallery(settings, "r1", "../escape")
+    with pytest.raises(FileExistsError):
+        refine_gallery(settings, "r1", settings.gallery_dir.name)
+
+
+def test_refine_needs_a_run_over_the_whole_gallery(settings: GallerySettings) -> None:
+    add_manifest_and_embeddings(settings.gallery_dir)
+    init_run(settings, "part", Subset(brands=("acme",)))
+    resolve_run(settings, "part", judge=None, min_confidence="low")
+
+    with pytest.raises(ValueError, match="whole gallery"):
+        refine_gallery(settings, "part", "refined")
+
+
+def relabel_one(settings: GallerySettings) -> None:
+    """A human relabel, so the refined gallery is not empty (the fake judge confirms none)."""
+    api_label(
+        RunState(settings=settings, run="r1"),
+        {"crop_id": "vidD-0_0", "verdict": "different_brand", "suggested_brand": "toyota"},
+    )
+
+
+def test_ui_refine_runs_in_background_and_rejects_taken_names(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    add_manifest_and_embeddings(settings.gallery_dir)
+    relabel_one(settings)
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
+    state = RunState(settings=settings, run="r1")
+
+    with pytest.raises(ValueError, match="exists"):
+        start_refine(state, {"name": settings.gallery_dir.name})
+    start_refine(state, {"name": "refined"})
+    job: dict[str, Any] = wait_for_job(state)
+
+    assert (job["kind"], job["status"], job["percent"]) == ("refine", "done", 100)
+    assert job["result"]["gallery"].endswith("/refined")
+    assert job["result"]["n_refined"] >= 1
+
+
+def test_refine_reports_rising_progress(settings: GallerySettings, reviewed: RunPaths) -> None:
+    add_manifest_and_embeddings(settings.gallery_dir)
+    relabel_one(settings)
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
+    seen: list[tuple[str, float]] = []
+
+    refine_gallery(settings, "r1", "refined", progress=lambda *a: seen.append(a))
+
+    fractions: list[float] = [f for _, f in seen]
+    assert fractions == sorted(fractions)
+    assert (fractions[0], fractions[-1]) == (0.0, 1.0)
+    assert "slicing embeddings" in {s for s, _ in seen}
