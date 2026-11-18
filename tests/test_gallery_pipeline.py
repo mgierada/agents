@@ -2,7 +2,10 @@
 judge (no model calls)."""
 
 import json
+import os
 import re
+import signal
+import time
 from pathlib import Path
 from typing import Any
 
@@ -80,7 +83,7 @@ def settings(
         gallery_dir=gallery_dir,
         target_list=target_list,
         judge="fake:judge",
-        workers=1,
+        review_workers=1,
         min_side_px=20,
         pack_small_groups=False,  # one montage per cluster, as these tests assume
     )
@@ -608,3 +611,48 @@ def test_ui_follows_verdicts_appended_by_a_running_review(settings: GallerySetti
     with paths.judgements.open("a") as f:
         f.write(json.dumps(verdict(crop_b, "not_a_logo"))[20:] + "\n")  # line completed
     assert shown(crop_b) == "not_a_logo"
+
+
+@pytest.mark.parametrize("stop_signal", [signal.SIGINT, signal.SIGTERM])
+def test_stopping_a_review_cancels_queue_saves_started_units_and_logs_spend(
+    settings: GallerySettings, monkeypatch: pytest.MonkeyPatch, stop_signal: signal.Signals
+) -> None:
+    calls: list[int] = []
+
+    def slow_judge(messages: list[BaseMessage]) -> Any:
+        calls.append(1)
+        if len(calls) == 1:
+            os.kill(os.getpid(), stop_signal)  # Ctrl-C, or `kill <pid>` from another terminal
+        time.sleep(0.3)  # a real call takes seconds, so the queue cannot drain meanwhile
+        return fake_judge(messages)
+
+    monkeypatch.setattr(review, "build_chain", lambda **_: RunnableLambda(slow_judge))
+    paths: RunPaths = init_run(settings, "r1", Subset())
+    with pytest.raises(KeyboardInterrupt):
+        review.review_run(settings, "r1", review.ReviewScope())
+
+    log_entry: dict[str, Any] = jsonl.read(paths.review_log)[-1]
+    assert len(calls) < log_entry["units"]  # queued units were cancelled, not worked through
+    assert len(jsonl.read(paths.units)) == len(calls)  # every started unit was saved
+    assert (log_entry["status"], log_entry["units_done"]) == ("stopped", len(calls))
+    assert json.loads(paths.progress.read_text())["status"] == "stopped"
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL  # handlers restored
+
+
+def test_spend_counts_a_review_killed_before_logging(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    progress: dict[str, Any] = json.loads(reviewed.progress.read_text())
+    reviewed.review_log.unlink()  # as if SIGKILL hit before the log entry was written
+    progress |= {"status": "running", "usage": {"requests": 3, "input_tokens": 1_000_000}}
+    reviewed.progress.write_text(json.dumps(progress | {"judge": "claude:claude-haiku-5-5"}))
+
+    spend: dict[str, Any] = api_spend(RunState(settings=settings, run="r1"))
+
+    assert [r["status"] for r in spend["recent"]] == ["running"]
+    assert spend["run_usd"] == pytest.approx(0.10)  # 1M input tokens of Haiku
+    jsonl.append(
+        reviewed.review_log,
+        [{"ts": jsonl.now(), "started": progress["started"], "judge": "fake:judge", "usage": {}}],
+    )
+    assert len(api_spend(RunState(settings=settings, run="r1"))["recent"]) == 1  # not twice

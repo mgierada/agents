@@ -163,6 +163,12 @@ not match the schema (e.g. a tile label in `cluster_verdict`) is retried up to
 `CLEANUP_GALLERY_JUDGE_RETRIES` times (default 2, logged as `unit_retry`, each retry billed);
 auth errors, unknown models and refusals are not retried.
 
+**Stopping a review.** Ctrl-C, `kill <pid>` or closing the terminal stops `review` cleanly
+within about half a second: queued units are cancelled, units already being judged finish
+(a few seconds) and are saved, and `review_log.jsonl` gets an entry with `status: stopped`,
+the units done and the token usage. Re-run the same command to continue. Only `kill -9`
+skips the log entry; the spend counter then takes the usage from `review_progress.json`.
+
 **Runs.** `ui --run X` opens on run X, but the **run** picker in the header switches to any
 run of the gallery (`agent_audit/*/`, newest first, marked *reviewing…* while a review runs).
 The run is in the URL (`?run=pilot`), so each browser tab can show a different run and links

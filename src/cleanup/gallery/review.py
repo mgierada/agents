@@ -9,9 +9,11 @@ verdict to judgements.jsonl; a re-run skips crops this judge already reviewed.
 import hashlib
 import json
 import re
+import signal
 import threading
-from collections.abc import Callable, Iterator
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from collections.abc import Callable, Generator, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,10 @@ NOISE_CLUSTER = -1
 PACKED_CLUSTER = -100
 UNSAFE_CHARS = re.compile(r"[^a-z0-9]+")
 MONTAGE_QUALITY = 90
+# Stop signals handled like Ctrl-C during a review (SIGKILL cannot be caught).
+STOP_SIGNALS: tuple[signal.Signals, ...] = (signal.SIGTERM, signal.SIGHUP)
+# How often the review loop wakes up to notice a stop signal.
+SIGNAL_CHECK_SECONDS = 0.5
 # Answers that do not match the schema; another call may well succeed. Auth errors, missing
 # models and refusals are not retried.
 RETRYABLE_ERRORS: tuple[type[Exception], ...] = (
@@ -107,6 +113,7 @@ def review_run(settings: GallerySettings, run: str, scope: ReviewScope) -> dict[
         judge=settings.judge,
         total_units=len(units),
         total_crops=sum(len(u.crop_ids) for u in units),
+        usage=lambda: chain_usage(chain),
     )
     tracker.write_queue(
         paths.review_queue,
@@ -114,29 +121,55 @@ def review_run(settings: GallerySettings, run: str, scope: ReviewScope) -> dict[
         units_offset=paths.units.stat().st_size if paths.units.exists() else 0,
     )
     tracker.write()
+    status: str = "stopped"
     try:
-        run_parallel(units, reviewer, settings.review_workers, paths, tracker)
-    except BaseException:
-        tracker.finish("stopped")
-        raise
-    tracker.finish("finished")
-    usage: dict[str, int] = chain_usage(chain)
-    jsonl.append(
-        paths.review_log,
-        [
-            {
-                "ts": jsonl.now(),
-                "judge": settings.judge,
-                "effort": settings.judge_effort,
-                "scope": asdict(scope),
-                "units": len(units),
-                "crops": sum(len(u.crop_ids) for u in units),
-                "usage": usage,
-            }
-        ],
-    )
-    log.info("review_done", run=run, **usage)
+        with stop_signals_raise_interrupt():
+            run_parallel(units, reviewer, settings.review_workers, paths, tracker)
+        status = "finished"
+    finally:
+        # Runs on success, Ctrl-C, kill (SIGTERM), a closed terminal (SIGHUP) and errors, so
+        # the run's spend is never lost. Only SIGKILL skips it; review_progress.json then
+        # still holds the usage up to the last finished unit (see pricing.spend_report).
+        tracker.finish(status)
+        usage: dict[str, int] = chain_usage(chain)
+        jsonl.append(
+            paths.review_log,
+            [
+                {
+                    "ts": jsonl.now(),
+                    "started": tracker.started,
+                    "status": status,
+                    "judge": settings.judge,
+                    "effort": settings.judge_effort,
+                    "scope": asdict(scope),
+                    "units": len(units),
+                    "units_done": tracker.done_units,
+                    "crops": sum(len(u.crop_ids) for u in units),
+                    "usage": usage,
+                }
+            ],
+        )
+        log.info(f"review_{status}", run=run, units_done=tracker.done_units, **usage)
     return usage
+
+
+@contextmanager
+def stop_signals_raise_interrupt() -> Generator[None]:
+    """Treat SIGTERM (`kill`) and SIGHUP (terminal closed) like Ctrl-C while reviewing, so the
+    review stops cleanly and logs its spend. Only possible from the main thread."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    def interrupt(signum: int, _frame: Any) -> None:
+        raise KeyboardInterrupt(f"signal {signum}")
+
+    previous: dict[int, Any] = {sig: signal.signal(sig, interrupt) for sig in STOP_SIGNALS}
+    try:
+        yield
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 def judge_one(settings: GallerySettings, run: str, crop_id: str, judge: str) -> dict[str, Any]:
@@ -404,23 +437,43 @@ def run_parallel(
     paths: RunPaths,
     tracker: "ProgressTracker | None" = None,
 ) -> None:
-    """Review units concurrently, appending results as each one finishes."""
+    """Review units concurrently, appending results as each one finishes.
+
+    On an interrupt (Ctrl-C, or a stop signal turned into one) queued units are cancelled,
+    the ones already running finish (a few seconds) and are saved, then the interrupt is
+    re-raised. Without this the pool would keep working through the whole queue.
+    """
 
     def tracked(unit: ReviewUnit) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         if tracker is not None:
             tracker.start(unit)
         return reviewer(unit)
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures: list[Future[tuple[list[dict[str, Any]], dict[str, Any]]]] = [
-            pool.submit(tracked, u) for u in units
-        ]
+    def save(future: Future[tuple[list[dict[str, Any]], dict[str, Any]]]) -> None:
+        rows, unit_row = future.result()
+        jsonl.append(paths.judgements, rows)
+        jsonl.append(paths.units, [unit_row])
+        if tracker is not None:
+            tracker.record(unit_row)
+
+    pool = ThreadPoolExecutor(max_workers=workers)
+    futures: list[Future[tuple[list[dict[str, Any]], dict[str, Any]]]] = [
+        pool.submit(tracked, u) for u in units
+    ]
+    saved: set[Future[Any]] = set()
+    try:
         for future in progress(completed(futures), desc="review", total=len(units), unit="unit"):
-            rows, unit_row = future.result()
-            jsonl.append(paths.judgements, rows)
-            jsonl.append(paths.units, [unit_row])
-            if tracker is not None:
-                tracker.record(unit_row)
+            save(future)
+            saved.add(future)
+    except BaseException:
+        log.warning("review_stopping", finishing=sum(f.running() for f in futures))
+        pool.shutdown(wait=True, cancel_futures=True)
+        for future in futures:
+            if future not in saved and future.done() and not future.cancelled():
+                save(future)
+        raise
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
 
 @dataclass
@@ -440,6 +493,9 @@ class ProgressTracker:
     errors: int = 0
     status: str = "running"
     judging: dict[str, list[str]] = field(default_factory=dict)
+    # Token usage so far (the judge's tally), stored with every update so spend survives
+    # even a SIGKILL that skips the review_log entry.
+    usage: Callable[[], dict[str, int]] = field(default=lambda: {}, repr=False, compare=False)
     lock: threading.RLock = field(default_factory=threading.RLock, repr=False, compare=False)
 
     def write_queue(self, path: Path, crop_ids: list[str], units_offset: int) -> None:
@@ -495,6 +551,7 @@ class ProgressTracker:
                     "errors": self.errors,
                     "status": self.status,
                     "judging": self.judging,
+                    "usage": self.usage(),
                     "updated": jsonl.now(),
                 },
             )
@@ -508,14 +565,21 @@ def atomic_write(path: Path, data: dict[str, Any]) -> None:
 
 
 def completed(futures: list[Future[Any]]) -> Iterator[Future[Any]]:
-    """Futures in completion order."""
-    yield from as_completed(futures)
+    """Futures in completion order.
+
+    Waits in short slices instead of one blocking wait: on macOS a thread blocked on a lock
+    is not woken by signals, so Ctrl-C / kill would only be noticed when the next unit ends.
+    """
+    pending: set[Future[Any]] = set(futures)
+    while pending:
+        done, pending = wait(pending, timeout=SIGNAL_CHECK_SECONDS, return_when=FIRST_COMPLETED)
+        yield from done
 
 
 def chain_usage(chain: Runnable[list[BaseMessage], Any]) -> dict[str, int]:
     """Token usage of the run so far (Claude, Bedrock, OpenAI); empty for Ollama."""
     func: Any = chain.func if isinstance(chain, RunnableLambda) else None
-    return dict(func.usage) if isinstance(func, UsageTally) else {}
+    return func.snapshot() if isinstance(func, UsageTally) else {}
 
 
 def log_retry(unit_id: str, state: RetryCallState) -> None:

@@ -751,7 +751,7 @@
           (s.unpriced_judges.length ? ` · not priced (excluded): ${s.unpriced_judges.join(", ")}` : "");
         const recent = s.recent.map((r) => ({...r, usd: usd(r.usd), usd_per_request: usd(r.usd_per_request, 5)}));
         if (!recent.length) $("cost-recent").innerHTML = "<tr><td>No review calls in this run yet.</td></tr>";
-        else table($("cost-recent"), recent, ["ts", "judge", "units", "crops", "requests", "input_tokens", "cache_read", "cache_write", "output_tokens", "usd", "usd_per_request"]);
+        else table($("cost-recent"), recent, ["ts", "status", "judge", "units", "units_done", "crops", "requests", "input_tokens", "cache_read", "cache_write", "output_tokens", "usd", "usd_per_request"]);
         $("cost-asof").textContent = `Snapshot from ${s.prices_as_of}, standard tier, prompts under 100K tokens. ` +
           "Cache write is the 5-minute rate. ollama: free. Prices drift: check AWS / Anthropic pricing before relying on totals.";
         table($("cost-prices"), s.prices, ["judge", "input", "output", "cache_read", "cache_write", "source"]);

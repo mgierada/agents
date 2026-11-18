@@ -227,6 +227,11 @@ class UsageTally:
         with self._lock:
             self.usage.update(requests=1, **counts)
 
+    def snapshot(self) -> dict[str, int]:
+        """Copy of the tally, safe while worker threads keep recording."""
+        with self._lock:
+            return dict(self.usage)
+
 
 class LangChainStructured(UsageTally):
     """Calls a LangChain chat model with structured output and tallies token usage."""

@@ -186,6 +186,30 @@ def calibrate(
     typer.echo(json.dumps(report, indent=2))
 
 
+@app.command(name="backfill-spend")
+def backfill_spend_cmd(
+    run: Run,
+    gallery_dir: GalleryDir = None,
+    runs_dir: RunsDir = None,
+    target_list: TargetList = None,
+    aliases: Aliases = None,
+) -> None:
+    """Add estimated review_log entries for reviews killed before logging their spend."""
+    from cleanup.gallery.pricing import backfill_spend, estimate_usd
+
+    settings: GallerySettings = settings_from(
+        gallery_dir=gallery_dir, runs_dir=runs_dir, target_list=target_list, aliases=aliases
+    )
+    configure_logging()
+    entries: list[dict[str, Any]] = backfill_spend(settings.run_paths(run).root)
+    if not entries:
+        typer.echo("nothing to backfill: every saved unit is covered by a log entry")
+    for entry in entries:
+        usd: float | None = estimate_usd(entry["judge"], entry["usage"])
+        cost: str = "unpriced" if usd is None else f"~${usd:.2f}"
+        typer.echo(f"{entry['judge']}: {entry['units']:,} units, {entry['crops']:,} crops, {cost}")
+
+
 @app.command()
 def plot(
     run: Run,

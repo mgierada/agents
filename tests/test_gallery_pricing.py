@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from cleanup.gallery.pricing import estimate_usd, spend_report
+from cleanup.gallery.pricing import backfill_spend, estimate_usd, spend_report
 
 USAGE: dict[str, int] = {
     "requests": 2,
@@ -68,3 +68,45 @@ def test_spend_report_totals_per_run_and_gallery(tmp_path: Path) -> None:
     assert report["recent"][0]["usd"] == 0.0  # no successful request, nothing billed
     assert report["recent"][2]["usd_per_request"] == pytest.approx(0.10)
     assert any(p["judge"] == "claude:claude-haiku-5-5" for p in report["prices"])
+
+
+def unit_row(judge: str, n_tiles: int, error: bool = False) -> dict[str, Any]:
+    return {"judge": judge, "n_tiles": n_tiles} | ({"error": "x"} if error else {})
+
+
+HAIKU = "bedrock-converse:global.anthropic.claude-haiku-5-5"
+
+
+def test_backfill_estimates_only_unlogged_units_and_is_idempotent(tmp_path: Path) -> None:
+    run: Path = tmp_path / "full"
+    run.mkdir()
+    rows: list[dict[str, Any]] = [unit_row(HAIKU, 16) for _ in range(10)] + [
+        unit_row(HAIKU, 16, error=True)
+    ]
+    (run / "units.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    # One finished review logged 4 units; the other 7 were saved by a killed review.
+    (run / "review_log.jsonl").write_text(
+        json.dumps({"ts": "t", "judge": HAIKU, "units": 4, "usage": {}}) + "\n"
+    )
+
+    entries: list[dict[str, Any]] = backfill_spend(run)
+
+    assert [(e["units"], e["usage"]["requests"]) for e in entries] == [(7, 6)]  # error: free
+    assert estimate_usd(HAIKU, entries[0]["usage"]) == pytest.approx(6 * 0.00073, rel=0.05)
+    assert backfill_spend(run) == []  # second run: already covered
+
+
+def test_backfill_leaves_a_running_review_alone(tmp_path: Path) -> None:
+    run: Path = tmp_path / "full"
+    run.mkdir()
+    done: str = json.dumps(unit_row(HAIKU, 16)) + "\n"
+    (run / "units.jsonl").write_text(done * 3)
+    offset: int = (run / "units.jsonl").stat().st_size
+    (run / "review_queue.json").write_text(json.dumps({"units_offset": offset}))
+    (run / "review_progress.json").write_text(json.dumps({"status": "running"}))
+    with (run / "units.jsonl").open("a") as f:
+        f.write(done * 5)  # written by the running review: it will log these itself
+
+    entries: list[dict[str, Any]] = backfill_spend(run)
+
+    assert [e["units"] for e in entries] == [3]
