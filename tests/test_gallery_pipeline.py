@@ -30,6 +30,7 @@ from cleanup.gallery.server import (
     RunRegistry,
     RunState,
     api_accept_relabels,
+    api_brand_stats,
     api_items,
     api_job,
     api_label,
@@ -910,3 +911,15 @@ def test_refine_reports_rising_progress(settings: GallerySettings, reviewed: Run
     assert fractions == sorted(fractions)
     assert (fractions[0], fractions[-1]) == (0.0, 1.0)
     assert "slicing embeddings" in {s for s, _ in seen}
+
+
+def test_ui_brand_stats_api(settings: GallerySettings, reviewed: RunPaths) -> None:
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
+    state = RunState(settings=settings, run="r1")
+
+    stats: dict[str, Any] = api_brand_stats(state, {"top": "5", "min_judged": "0"})
+
+    assert stats["overall"]["crops"] == state.items.height
+    assert {b["brand"] for b in stats["brands"]} <= set(state.items["brand"].to_list())
+    with pytest.raises(ValueError, match="integers"):
+        api_brand_stats(state, {"top": "many"})

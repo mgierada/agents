@@ -18,6 +18,12 @@
       --bad: #b3261e;
       --info: #5b3fb8;
       --sel: #2f5bd3;
+      /* VLM verdict series: categorical slots 1-4 (validated for adjacent stacks) */
+      --v-brand_match: #2a78d6;
+      --v-different_brand: #eb6834;
+      --v-unrecognisable: #1baf7a;
+      --v-not_a_logo: #eda100;
+      --bar-neutral: #8a8984;
     }
 
     @media (prefers-color-scheme: dark) {
@@ -33,6 +39,11 @@
         --bad: #ff7b72;
         --info: #b29cff;
         --sel: #7c9cff;
+        --v-brand_match: #3987e5;
+        --v-different_brand: #d95926;
+        --v-unrecognisable: #199e70;
+        --v-not_a_logo: #c98500;
+        --bar-neutral: #7a7974;
       }
     }
 
@@ -300,6 +311,38 @@
       max-width: 100%;
     }
 
+    /* Brand stats */
+    .stats-controls { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; margin: 4px 0 12px; }
+    a { color: inherit; text-decoration: none; cursor: pointer; }
+    a:hover { color: var(--muted); text-decoration: underline; }
+    /* Tiles grow to fit their full one-line labels; rows stay aligned (no wrapping inside). */
+    .tiles { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+    .tile { flex: 1 0 240px; min-width: max-content; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+    .tile .k, .tile .s { white-space: nowrap; }
+    .tile .k { color: var(--muted); font-size: 12px; }
+    .tile .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+    .tile .s { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+    .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; margin: 4px 0 8px; }
+    .legend.sortable span { cursor: pointer; padding: 1px 6px; border-radius: 4px; border: 1px solid transparent; }
+    .legend.sortable span:hover { color: var(--text); border-color: var(--line); }
+    .legend.sortable span.on { color: var(--text); border-color: var(--line); font-weight: 600; }
+    th .arrow { color: var(--muted); font-size: 10px; margin-left: 3px; }
+    th.sorted { color: var(--text); }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+    .chart { display: grid; grid-template-columns: minmax(120px, 260px) 1fr minmax(120px, auto); gap: 4px 10px; align-items: center; width: 100%; }
+    .chart .lbl { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: right; }
+    .chart .val { color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .stack { display: flex; gap: 2px; height: 16px; }
+    .stack span { min-width: 0; height: 100%; }
+    .stack span:first-child { border-radius: 4px 0 0 4px; }
+    .stack span:last-child { border-radius: 0 4px 4px 0; }
+    .stack span:only-child { border-radius: 4px; }
+    .stack span:hover, .hbar:hover { filter: brightness(1.15); }
+    .hbar { height: 14px; border-radius: 0 4px 4px 0; background: var(--bar-neutral); min-width: 2px; }
+    .stats-section { margin: 18px 0; }
+    .stats-section h3 { margin: 0 0 4px; }
+    .cellbar { display: inline-block; height: 8px; border-radius: 0 3px 3px 0; background: var(--v-different_brand); vertical-align: middle; margin-left: 6px; }
+
     .help {
       color: var(--muted);
       font-size: 12px;
@@ -325,7 +368,7 @@
       title="Estimated judge spend from review_log.jsonl token usage; see the Cost tab"></span>
     <nav class="tabs">
       <button data-tab="crops" class="on">Crops</button>
-      <button data-tab="brands">Brand changes</button>
+      <button data-tab="brands">Brand stats</button>
       <button data-tab="log">Change log</button>
       <button data-tab="cost">Cost</button>
     </nav>
@@ -405,9 +448,60 @@
 
   <section id="tab-brands" class="hidden">
     <main>
-      <p class="help">Per brand: crops before vs after the last resolve. relabelled_in counts crops moved to this brand
-        from others.</p>
-      <table id="brands"></table>
+      <p class="help">How often the VLM's latest verdict disagrees with each crop's annotated (original) brand.
+        Crops not judged yet are not counted in rates. Click a brand to see its crops.</p>
+      <div class="stats-controls">
+        <label>rank brands by <select id="bs-sort">
+          <option value="disagree_rate">disagree rate (any non-match)</option>
+          <option value="brand_match_rate">agree rate (VLM agrees with label)</option>
+          <option value="mislabel_rate">mislabel rate (different brand)</option>
+          <option value="unrecognisable_rate">unrecognisable rate</option>
+          <option value="not_a_logo_rate">not-a-logo rate</option>
+          <option value="mislabelled">mislabelled crops (count)</option>
+          <option value="disagree">disagreeing crops (count)</option>
+          <option value="net_change">net change after resolve</option>
+        </select></label>
+        <label>show <select id="bs-order">
+          <option value="desc">highest first</option>
+          <option value="asc">lowest first</option>
+        </select></label>
+        <label>top <select id="bs-top"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></label>
+        <label title="Brands with fewer judged crops are left out of the ranking">min judged crops
+          <select id="bs-min"><option>0</option><option>5</option><option selected>20</option><option>50</option><option>100</option></select></label>
+      </div>
+
+      <div class="stats-section">
+        <h3>Overall</h3>
+        <div class="tiles" id="bs-tiles"></div>
+        <div class="legend" id="bs-legend"></div>
+        <div class="chart" id="bs-overall"></div>
+      </div>
+
+      <div class="stats-section">
+        <h3>Decisions after the last resolve</h3>
+        <div class="chart" id="bs-decisions"></div>
+      </div>
+
+      <div class="stats-section">
+        <h3 id="bs-brands-title">Top brands</h3>
+        <p class="help" id="bs-brands-help"></p>
+        <div class="legend sortable" id="bs-legend-2"></div>
+        <div class="chart" id="bs-brands"></div>
+        <button class="plain" id="bs-more" style="margin-top:8px" hidden>Load more</button>
+        <details style="margin-top:10px"><summary>table</summary><table id="bs-brands-table"></table></details>
+      </div>
+
+      <div class="stats-section">
+        <h3>Most common mislabels</h3>
+        <p class="help">Annotated brand → brand the VLM named instead (different_brand verdicts). share = of that brand's judged crops.</p>
+        <table id="bs-pairs"></table>
+      </div>
+
+      <div class="stats-section">
+        <h3>Before / after per brand (all brands)</h3>
+        <p class="help">Crops before vs after the last resolve. relabelled_in counts crops moved to this brand from others.</p>
+        <table id="brands"></table>
+      </div>
     </main>
   </section>
 
@@ -683,17 +777,33 @@
       $("dlg").showModal();
     }
 
-    function table(el, rows, cols) {
-      let sortKey = null, asc = true;
+    // Sortable table: click a header to sort (again to flip); ▲/▼ marks the sorted column.
+    // `initial` ({key, asc}) marks an order the rows already arrive in (e.g. server ranking).
+    function table(el, rows, cols, initial = null) {
+      let sortKey = initial?.key ?? null, asc = initial?.asc ?? true, presorted = Boolean(initial);
+      const compare = (a, b) => {
+        if (a === b) return 0;
+        if (a === null || a === undefined) return 1;   // empty cells last either way
+        if (b === null || b === undefined) return -1;
+        const order = typeof a === "number" && typeof b === "number" ? a - b : String(a).localeCompare(String(b));
+        return asc ? order : -order;
+      };
       const draw = () => {
-        const sorted = sortKey ? [...rows].sort((a, b) => (a[sortKey] > b[sortKey] ? 1 : -1) * (asc ? 1 : -1)) : rows;
-        el.innerHTML = `<tr>${cols.map((c) => `<th data-k="${c}" class="${typeof rows[0]?.[c] === "number" ? "num" : ""}">${c}</th>`).join("")}</tr>` +
+        const sorted = sortKey && !presorted ? [...rows].sort((a, b) => compare(a[sortKey], b[sortKey])) : rows;
+        el.innerHTML = `<tr>${cols.map((c) => {
+          const on = c === sortKey;
+          const arrow = on ? `<span class="arrow">${asc ? "▲" : "▼"}</span>` : "";
+          return `<th data-k="${c}" class="${typeof rows[0]?.[c] === "number" ? "num" : ""} ${on ? "sorted" : ""}">${c}${arrow}</th>`;
+        }).join("")}</tr>` +
           sorted.map((r) => `<tr>${cols.map((c) => {
             const v = r[c]; const n = typeof v === "number";
             const cls = n ? `num ${c === "delta" ? (v > 0 ? "pos" : v < 0 ? "neg" : "") : ""}` : "";
             return `<td class="${cls}">${esc(v)}</td>`;
           }).join("")}</tr>`).join("");
-        el.querySelectorAll("th").forEach((th) => th.onclick = () => {asc = sortKey === th.dataset.k ? !asc : true; sortKey = th.dataset.k; draw();});
+        el.querySelectorAll("th").forEach((th) => th.onclick = () => {
+          asc = sortKey === th.dataset.k ? !asc : typeof rows[0]?.[th.dataset.k] !== "number";
+          sortKey = th.dataset.k; presorted = false; draw();
+        });
       };
       draw();
     }
@@ -771,6 +881,7 @@
         table($("cost-prices"), s.prices, ["judge", "input", "output", "cache_read", "cache_write", "source"]);
       }
       if (name === "brands") {
+        loadBrandStats().catch((err) => alert(err.message));
         const rows = await api("/api/brand_changes");
         if (!rows.length) {$("brands").innerHTML = "<tr><td>Run Resolve first.</td></tr>"; return;}
         table($("brands"), rows, ["brand", "before", "kept", "relabelled_out", "relabelled_in", "removed", "pending", "after", "delta"]);
@@ -781,6 +892,131 @@
         table($("log"), rows, ["ts", "crop_id", "brand", "previous_verdict", "verdict", "suggested_brand", "judge_verdict", "note"]);
       }
     }
+
+    // ---- Brand stats tab -------------------------------------------------------------
+    const VERDICT_NAMES = {brand_match: "agrees with label", different_brand: "different brand (mislabelled)",
+      unrecognisable: "unrecognisable", not_a_logo: "not a logo"};
+    const fmt = (n) => (n ?? 0).toLocaleString();
+    const pct = (x, digits = 1) => `${(100 * (x || 0)).toFixed(digits)}%`;
+
+    // Legend items rank the brands by that verdict's share (click again to flip the order).
+    function legendHtml(verdicts, sorts) {
+      const order = $("bs-order").value, sort = $("bs-sort").value;
+      return verdicts.map((v) => {
+        const on = sorts[v] === sort;
+        const arrow = on ? (order === "desc" ? " ▼" : " ▲") : "";
+        const hint = on ? "click to flip the order" : `rank brands by share of ${VERDICT_NAMES[v] || v}`;
+        return `<span data-sort="${esc(sorts[v])}" class="${on ? "on" : ""}" title="${esc(hint)}"><i style="background:var(--v-${v})"></i>${esc(VERDICT_NAMES[v] || v)}${arrow}</span>`;
+      }).join("");
+    }
+
+    function sortByLegend(sort) {
+      if ($("bs-sort").value === sort) $("bs-order").value = $("bs-order").value === "desc" ? "asc" : "desc";
+      else {$("bs-sort").value = sort; $("bs-order").value = "desc";}
+      loadBrandStats().catch((err) => alert(err.message));
+    }
+
+    // One 100% stacked bar of verdict counts; each segment carries its own tooltip.
+    function stackHtml(counts, verdicts, label) {
+      const total = verdicts.reduce((a, v) => a + (counts[v] || 0), 0);
+      if (!total) return `<div class="stack"></div>`;
+      return `<div class="stack">${verdicts.filter((v) => counts[v]).map((v) =>
+        `<span style="flex:${counts[v]};background:var(--v-${v})" title="${esc(label)}\n${esc(VERDICT_NAMES[v])}: ${fmt(counts[v])} (${pct(counts[v] / total)})"></span>`).join("")}</div>`;
+    }
+
+    function tile(k, v, sub = "", hint = "") {
+      return `<div class="tile" title="${esc(hint || `${k}: ${v}${sub ? ` (${sub})` : ""}`)}"><div class="k">${esc(k)}</div>` +
+        `<div class="v">${esc(v)}</div><div class="s">${esc(sub)}</div></div>`;
+    }
+
+    function showBrand(brand) {
+      $("f-brand").value = brand; offset = 0;
+      showTab("crops"); loadItems();
+    }
+
+    // Ranked brands loaded so far (Load more appends the next page) and the last response.
+    let bsBrands = [], bsLast = null;
+
+    function brandStatsQuery(offset) {
+      return new URLSearchParams({sort: $("bs-sort").value, order: $("bs-order").value, top: $("bs-top").value,
+        min_judged: $("bs-min").value, offset});
+    }
+
+    async function loadMoreBrands() {
+      const st = await api(`/api/brand_stats?${brandStatsQuery(bsBrands.length)}`);
+      bsBrands = bsBrands.concat(st.brands); bsLast = st;
+      renderBrands();
+    }
+
+    function renderBrands() {
+      const st = bsLast, V = st.verdicts;
+      const sortName = $("bs-sort").selectedOptions[0].textContent;
+      const asc = $("bs-order").value === "asc";
+      $("bs-brands-title").textContent = `${bsBrands.length} brands by ${sortName}, ${asc ? "lowest" : "highest"} first`;
+      $("bs-legend-2").innerHTML = legendHtml(V, st.verdict_sorts);
+      $("bs-legend-2").querySelectorAll("span[data-sort]").forEach((el) => el.onclick = () => sortByLegend(el.dataset.sort));
+      $("bs-brands-help").textContent = `${fmt(st.n_ranked)} of ${fmt(st.n_brands)} brands have ≥ ${$("bs-min").value} judged crops. Bars: verdict mix of each brand's judged crops; hover for counts.`;
+      $("bs-brands").innerHTML = bsBrands.length ? bsBrands.map((b) => {
+        const counts = Object.fromEntries(V.map((v) => [v, b[v]]));
+        const extra = b.top_suggested ? ` · mostly → ${b.top_suggested} (${fmt(b.top_suggested_n)})` : "";
+        return `<a class="lbl" data-brand="${esc(b.brand)}" title="${esc(b.brand)}: show crops">${esc(b.brand)}</a>` +
+          stackHtml(counts, V, b.brand) +
+          `<span class="val" title="${esc(b.brand)}${esc(extra)}">disagree ${pct(b.disagree_rate, 0)} · mislabel ${pct(b.mislabel_rate, 0)} · n=${fmt(b.judged)}</span>`;
+      }).join("") : `<span class="help">No brand has enough judged crops.</span>`;
+      $("bs-brands").querySelectorAll("a[data-brand]").forEach((a) => a.onclick = () => showBrand(a.dataset.brand));
+      const pctCol = (x) => Math.round(1000 * (x || 0)) / 10;
+      const RATE_COLS = {brand_match_rate: "agree_%", disagree_rate: "disagree_%", mislabel_rate: "mislabel_%",
+        unrecognisable_rate: "unrecognisable_%", not_a_logo_rate: "not_a_logo_%", mislabelled: "different_brand", disagree: "disagree",
+        net_change: "net_change"};
+      const rows = bsBrands.map((b) => ({...b, ...Object.fromEntries(
+        Object.entries(RATE_COLS).filter(([k]) => k.endsWith("_rate")).map(([k, col]) => [col, pctCol(b[k])]))}));
+      table($("bs-brands-table"), rows,
+        ["brand", "crops", "judged", "brand_match", "different_brand", "unrecognisable", "not_a_logo", "disagree",
+         "agree_%", "disagree_%", "mislabel_%", "unrecognisable_%", "not_a_logo_%",
+         "top_suggested", "top_suggested_n", "relabelled_out", "relabelled_in", "after", "delta", "net_change"],
+        {key: RATE_COLS[$("bs-sort").value], asc: $("bs-order").value === "asc"});
+      const left = st.n_ranked - bsBrands.length;
+      $("bs-more").hidden = left <= 0;
+      $("bs-more").textContent = `Load ${Math.min(left, Number($("bs-top").value))} more (${fmt(left)} left)`;
+    }
+
+    async function loadBrandStats() {
+      const st = await api(`/api/brand_stats?${brandStatsQuery(0)}`);
+      bsBrands = st.brands; bsLast = st;
+      const o = st.overall, V = st.verdicts, judged = o.judged || 0;
+      const hv = o.human_vs_vlm;
+      $("bs-tiles").innerHTML = [
+        tile("judged by VLM", fmt(judged), `${pct(judged / (o.crops || 1))} of ${fmt(o.crops)} crops`),
+        tile("VLM agrees with label", pct(o.agree / (judged || 1)), `${fmt(o.agree)} crops`),
+        tile("mislabelled (different brand)", pct(o.verdicts.different_brand / (judged || 1)), `${fmt(o.verdicts.different_brand)} crops`),
+        tile("unrecognisable", pct(o.verdicts.unrecognisable / (judged || 1)), `${fmt(o.verdicts.unrecognisable)} crops`),
+        tile("not a logo", pct(o.verdicts.not_a_logo / (judged || 1)), `${fmt(o.verdicts.not_a_logo)} crops`),
+        tile("you vs VLM", hv.compared ? pct(hv.agree / hv.compared) : "n/a", `${fmt(hv.agree)} of ${fmt(hv.compared)} labels agree`,
+          `Your labels that match the VLM's verdict` + (o.bulk_accepted ? `; ${fmt(o.bulk_accepted)} bulk-accepted relabels excluded (they copy the VLM)` : "")),
+      ].join("");
+      $("bs-legend").innerHTML = V.map((v) => `<span><i style="background:var(--v-${v})"></i>${esc(VERDICT_NAMES[v] || v)}</span>`).join("");
+      $("bs-overall").innerHTML = `<span class="lbl">all judged crops</span>${stackHtml(o.verdicts, V, "all judged crops")}<span class="val">n=${fmt(judged)}</span>`;
+
+      const decisions = Object.entries(o.decisions);
+      const maxD = Math.max(1, ...decisions.map(([, n]) => n));
+      $("bs-decisions").innerHTML = decisions.length ? decisions.map(([d, n]) =>
+        `<span class="lbl">${esc(d)}</span><div><div class="hbar" style="width:${100 * n / maxD}%" title="${esc(d)}: ${fmt(n)} (${pct(n / o.crops)} of crops)"></div></div><span class="val">${fmt(n)} · ${pct(n / o.crops)}</span>`).join("")
+        : `<span class="help">Run Resolve first.</span>`;
+
+      renderBrands();
+
+      const maxP = Math.max(1, ...st.pairs.map((p) => p.n));
+      if (!st.pairs.length) $("bs-pairs").innerHTML = "<tr><td>No different_brand verdicts yet.</td></tr>";
+      else {
+        $("bs-pairs").innerHTML = `<tr><th>annotated brand</th><th>VLM says</th><th class="num">crops</th><th class="num">share</th></tr>` +
+          st.pairs.map((p) => `<tr><td><a href="#" data-brand="${esc(p.brand)}">${esc(p.brand)}</a></td><td>${esc(p.suggested)}</td>` +
+            `<td class="num">${fmt(p.n)}<span class="cellbar" style="width:${Math.round(60 * p.n / maxP)}px" title="${fmt(p.n)} crops"></span></td>` +
+            `<td class="num">${pct(p.share_of_judged)}</td></tr>`).join("");
+        $("bs-pairs").querySelectorAll("a[data-brand]").forEach((a) => a.onclick = (e) => {e.preventDefault(); showBrand(a.dataset.brand);});
+      }
+    }
+    for (const id of ["bs-sort", "bs-order", "bs-top", "bs-min"]) $(id).onchange = loadBrandStats;
+    $("bs-more").onclick = () => loadMoreBrands().catch((err) => alert(err.message));
 
     document.querySelectorAll(".tabs button").forEach((b) => b.onclick = () => showTab(b.dataset.tab));
     $("prev").onclick = () => {if (offset > 0) {offset = Math.max(0, offset - LIMIT); loadItems();} };
