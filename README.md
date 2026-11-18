@@ -215,18 +215,20 @@ the layout highfive-models' `logo-audit` leaves after its crops + embed stages:
 
 - `manifest.parquet`: only crops resolved `keep` or `relabel` (pending, suggested relabels,
   dropped, unrecognisable and not-a-logo crops are left out), `brand` = brand after resolve,
-  source row order; `crop_path` moved from `/<source>/crops/` to `/<new_gallery>/crops/`.
+  source row order. No `crop_path` column: highfive-models finds crops as
+  `<audit dir>/crops/<crop_id>.jpg`, so the dir can be copied or renamed freely.
 - `emb_<backbone>.npy`: the matching rows of every source embedding file (no re-embedding).
 - `crops` → relative symlink to the source's `crops/` (nothing copied).
 - `refine.json`: source, run, resolve settings, counts, and the command for the next step.
 
 The kNN outputs (`summary.json`, `analysis.parquet` with `suspect`/`cluster`, suspects,
 duplicates, contact sheets, brand scaling) depend on the new labels, so recompute them with
-highfive-models on the training host (where `crop_path` resolves), using the printed command:
+highfive-models' `logo-audit-analyze` (analyze stage on the dir alone, no batch needed),
+e.g. on the training host after `rsync -a` of the dir next to the source gallery (keeps the
+relative `crops` link):
 
 ```bash
-uv run highfive_models/data_processing/fiftyone/main.py logo-audit <batch> \
-    --stage analyze --output-dir <host path>/<new_gallery> --backbones siglip2
+uv run highfive_models/data_processing/fiftyone/main.py logo-audit-analyze <path>/<new_gallery>
 ```
 
 Refine needs a resolved run over the whole gallery (e.g. `full`), refuses an existing
@@ -295,4 +297,8 @@ Pilot run
 ```bash
 make gallery-pilot-run
 make gallery-review-pilot ARGS="--max-units 200"
+```
+
+```bash
+make gallery-refine NAME=clean                                                                               on  main [+] is 📦 v0.1.0 via 🐍 v3.15.0
 ```

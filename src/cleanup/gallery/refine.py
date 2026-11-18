@@ -9,7 +9,7 @@ symlink to the source's, and nothing of the source is modified.
 
 The kNN analysis (summary.json, analysis.parquet with suspect/cluster, suspects, duplicates,
 contact sheets, brand scaling) depends on the new labels, so it is left to highfive-models'
-`analyze` stage, run on the new dir (see `analyze_command`).
+`logo-audit-analyze` command, run on the new dir (see `analyze_command`).
 """
 
 import json
@@ -62,9 +62,7 @@ def refine_gallery(
     decisions: pl.DataFrame = load_decisions(paths=paths, expected=manifest.height)
     warn_if_stale(paths)
     report(progress=progress, stages=STAGES, stage="writing manifest", fraction=0.0)
-    refined, rows = refined_manifest(
-        manifest=manifest, decisions=decisions, source_name=source.name, name=name
-    )
+    refined, rows = refined_manifest(manifest=manifest, decisions=decisions)
     target.mkdir()
     refined.write_parquet(target / MANIFEST_NAME)
     embeddings: list[Path] = sorted(source.glob(EMBEDDING_GLOB))
@@ -85,7 +83,15 @@ def refine_gallery(
     ]
     report(progress=progress, stages=STAGES, stage="linking crops", fraction=0.0)
     (target / CROPS_DIR_NAME).symlink_to(os.path.relpath(source / CROPS_DIR_NAME, target))
-    info: dict[str, Any] = provenance(run, source, paths, decisions, refined, backbones)
+    info: dict[str, Any] = provenance(
+        run=run,
+        source=source,
+        target=target,
+        paths=paths,
+        decisions=decisions,
+        refined=refined,
+        backbones=backbones,
+    )
     (target / REFINE_NAME).write_text(json.dumps(info, indent=2))
     report(progress=progress, stages=STAGES, stage="linking crops", fraction=1.0)
     log.info("refined", gallery=str(target), crops=refined.height, of=manifest.height)
@@ -128,12 +134,12 @@ def warn_if_stale(paths: RunPaths) -> None:
 
 
 def refined_manifest(
-    manifest: pl.DataFrame, decisions: pl.DataFrame, source_name: str, name: str
+    manifest: pl.DataFrame, decisions: pl.DataFrame
 ) -> tuple[pl.DataFrame, np.ndarray]:
     """Kept manifest rows (source order) with brand_after, and their source row indices.
 
-    crop_path is moved under the new dir (`/<source>/crops/` -> `/<name>/crops/`), which
-    resolves through the crops symlink wherever both dirs sit side by side.
+    Older source manifests carry an absolute crop_path; it is dropped (highfive-models finds
+    crops as <audit dir>/crops/<crop_id>.jpg), so the refined dir can be copied or renamed.
     """
     joined: pl.DataFrame = (
         manifest.with_row_index("_row")
@@ -141,12 +147,8 @@ def refined_manifest(
         .filter(pl.col("decision").is_in(REFINED_DECISIONS))
     )
     rows: np.ndarray = joined["_row"].to_numpy()
-    refined: pl.DataFrame = joined.with_columns(
-        brand=pl.col("brand_after"),
-        crop_path=pl.col("crop_path").str.replace(
-            f"/{source_name}/{CROPS_DIR_NAME}/", f"/{name}/{CROPS_DIR_NAME}/", literal=True
-        ),
-    ).select(manifest.columns)
+    columns: list[str] = [c for c in manifest.columns if c != "crop_path"]
+    refined: pl.DataFrame = joined.with_columns(brand=pl.col("brand_after")).select(columns)
     return refined, rows
 
 
@@ -172,6 +174,7 @@ def slice_embeddings(
 def provenance(
     run: str,
     source: Path,
+    target: Path,
     paths: RunPaths,
     decisions: pl.DataFrame,
     refined: pl.DataFrame,
@@ -192,21 +195,15 @@ def provenance(
         "decisions": dict(decisions["decision"].value_counts().iter_rows()),
         "n_brands": refined["brand"].n_unique(),
         "backbones": backbones,
-        "analyze_command": analyze_command(source.name, refined, backbones),
+        "analyze_command": analyze_command(target),
     }
 
 
-def analyze_command(source_name: str, refined: pl.DataFrame, backbones: list[str]) -> str:
+def analyze_command(target: Path) -> str:
     """highfive-models command recomputing the kNN outputs of the refined dir.
 
-    Runs where crop_path resolves (the training host): the output dir is taken from the
-    refined crop_path. `logo-audit` needs the source batch name only to check that the batch
-    exists; with `--stage analyze` it reads and writes nothing but the output dir.
+    `logo-audit-analyze` runs the analyze stage on the dir alone (every emb_*.npy in it,
+    crops from its crops/). Shown with the local path; after copying the dir to the training
+    host, pass its path there.
     """
-    output_dir: Path = Path(refined["crop_path"][0]).parent.parent if refined.height else Path()
-    batch: str = source_name.removeprefix("logo_audit_")
-    flags: str = " ".join(f"--backbones {b}" for b in backbones)
-    return (
-        "uv run highfive_models/data_processing/fiftyone/main.py logo-audit "
-        f"{batch} --stage analyze --output-dir {output_dir} {flags}"
-    )
+    return f"uv run highfive_models/data_processing/fiftyone/main.py logo-audit-analyze {target}"

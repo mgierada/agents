@@ -843,13 +843,10 @@ def test_refine_writes_confirmed_crops_with_new_brands_and_aligned_embeddings(
     rows: list[int] = [source_ids.index(c) for c in manifest["crop_id"]]
     np.testing.assert_array_equal(np.load(target / "emb_siglip2.npy"), emb[rows])
     assert (target / "crops" / f"{manifest['crop_id'][0]}.jpg").is_file()  # via symlink
-    assert manifest["crop_path"][0] == f"/host/refined/crops/{manifest['crop_id'][0]}.jpg"
+    assert "crop_path" not in manifest.columns  # crops are found by id: dir is relocatable
     info: dict[str, Any] = json.loads((target / "refine.json").read_text())
     assert (info["run"], info["n_refined"], info["backbones"]) == ("r1", kept.height, ["siglip2"])
-    assert (
-        "--stage analyze --output-dir /host/refined --backbones siglip2"
-        in (info["analyze_command"])
-    )
+    assert info["analyze_command"].endswith(f"main.py logo-audit-analyze {target}")
     assert not (target / "analysis.parquet").exists()  # kNN outputs: highfive's analyze stage
 
 
