@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from tqdm import tqdm
 
 from cleanup.console import configure_logging
 from cleanup.gallery.calibrate import calibrate_run
@@ -132,6 +133,15 @@ def review(
     typer.echo(f"usage: {usage}")
 
 
+RESOLVE_BAR = "{desc}: {percentage:3.0f}%|{bar}| [{elapsed}<{remaining}]"
+
+
+def show_progress(bar: tqdm, stage: str, fraction: float) -> None:
+    """Move a 0-100 tqdm bar to `fraction`, labelled with the stage."""
+    bar.set_description_str(stage, refresh=False)
+    bar.update(round(100 * fraction) - bar.n)
+
+
 @app.command()
 def resolve(
     run: Run,
@@ -158,13 +168,15 @@ def resolve(
         gallery_dir=gallery_dir, runs_dir=runs_dir, target_list=target_list, aliases=aliases
     )
     configure_logging()
-    resolve_run(
-        settings,
-        run,
-        judge=judge,
-        min_confidence=min_confidence,
-        trust_judge_relabels=trust_judge_relabels,
-    )
+    with tqdm(total=100, unit="%", bar_format=RESOLVE_BAR) as bar:
+        resolve_run(
+            settings,
+            run,
+            judge=judge,
+            min_confidence=min_confidence,
+            trust_judge_relabels=trust_judge_relabels,
+            progress=lambda stage, fraction: show_progress(bar, stage, fraction),
+        )
     paths = settings.run_paths(run)
     typer.echo(paths.summary.read_text())
 

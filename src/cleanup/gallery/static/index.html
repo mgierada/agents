@@ -451,6 +451,9 @@
       return url.pathname + url.search;
     };
 
+    const RESOLVE_POLL_MS = 500;
+    const RESOLVE_TITLE = $("resolve").title;
+
     async function api(path, body) {
       const res = await fetch(withRun(path), body ? {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)} : {});
       const data = await res.json();
@@ -789,14 +792,41 @@
       const scope = Object.keys(filters()).length ? "matching the current filters" : "in this run";
       if (!confirm(`Accept ${n} suggested relabel(s) ${scope}?\n\nEach crop is labelled "different brand" with the judge's suggested brand (logged as "accepted (bulk)"; change any back with its buttons). Then Resolve runs.`)) return;
       const btn = $("accept-relabels"); btn.disabled = true; btn.textContent = "Accepting…";
-      try {await api("/api/accept_relabels", {filters: filters(), min_confidence: $("minconf").value}); await loadMeta(); await loadItems();}
+      try {await api("/api/accept_relabels", {filters: filters(), min_confidence: $("minconf").value}); await watchResolve(true);}
       catch (err) {alert(err.message); countSuggested();}
     };
     $("resolve").onclick = async () => {
-      $("resolve").disabled = true; $("resolve").textContent = "Resolving…";
-      try {await api("/api/resolve", {min_confidence: $("minconf").value}); await loadMeta(); await loadItems();}
-      finally {$("resolve").disabled = false; $("resolve").textContent = "Resolve";}
+      try {await api("/api/resolve", {min_confidence: $("minconf").value}); await watchResolve(true);}
+      catch (err) {alert(err.message);}
     };
+
+    // Resolve runs in the background on the server; poll its progress until it ends.
+    let watchingResolve = false;
+    async function watchResolve(started = false) {
+      if (watchingResolve) return;
+      watchingResolve = true;
+      const btn = $("resolve");
+      let sawRunning = started;  // on page load, a resolve finished earlier needs no reload
+      try {
+        for (;;) {
+          const job = await api("/api/resolve_status");
+          if (job.status !== "running") {
+            if (!sawRunning) return;
+            if (job.status === "error") alert(`Resolve failed: ${job.error}`);
+            if (job.status === "done") {await loadMeta(); await loadItems();}
+            return;
+          }
+          sawRunning = true;
+          btn.disabled = true;
+          btn.textContent = `Resolving ${job.percent}%`;
+          btn.title = `${job.stage} (started ${job.started})`;
+          await new Promise((r) => setTimeout(r, RESOLVE_POLL_MS));
+        }
+      } finally {
+        watchingResolve = false;
+        btn.disabled = false; btn.textContent = "Resolve"; btn.title = RESOLVE_TITLE;
+      }
+    }
     document.addEventListener("keydown", (e) => {
       if ($("dlg").open || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
       if (e.key === "ArrowRight" || e.key === "j") {sel = Math.min(items.length - 1, sel + 1); markSel();}
@@ -812,7 +842,7 @@
       else if (KEYS[e.key] && items[sel]) {e.preventDefault(); label(sel, KEYS[e.key]);}
     });
 
-    (async () => {initLayout(); loadRuns(); await loadMeta(); markRun(); poll(); setInterval(poll, 1000 * (meta.refresh_seconds || 10)); await initFilters(); await loadItems();})();
+    (async () => {initLayout(); loadRuns(); await loadMeta(); markRun(); poll(); setInterval(poll, 1000 * (meta.refresh_seconds || 10)); await initFilters(); await loadItems(); watchResolve();})();
   </script>
 </body>
 

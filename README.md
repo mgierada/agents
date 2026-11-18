@@ -202,7 +202,10 @@ priced. Prices drift, so check AWS / Anthropic before relying on totals.
 
 **Resolve.** Your label > hard flag > judge verdict > `pending`. A suggested brand on the target
 list is a `relabel`; one that isn't is dropped from the gallery and listed in
-`new_class_candidates.csv` for you to decide on. No class ids are invented.
+`new_class_candidates.csv` for you to decide on. No class ids are invented. Resolve shows its
+progress in % (≈45 s on 1M crops): the CLI as a tqdm bar, the UI on the Resolve button. The UI
+runs it in the background (one per run; status at `/api/resolve_status`), so other tabs and
+a page reload keep showing it.
 
 ```mermaid
 ---

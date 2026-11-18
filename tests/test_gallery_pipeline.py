@@ -5,6 +5,7 @@ import json
 import os
 import re
 import signal
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -32,8 +33,10 @@ from cleanup.gallery.server import (
     api_meta,
     api_progress,
     api_rejudge,
+    api_resolve_status,
     api_runs,
     api_spend,
+    start_resolve,
 )
 from cleanup.gallery.subset import Subset
 
@@ -701,3 +704,90 @@ def test_accept_relabels_respects_the_unit_filter(
         == sum(i["judge_unit_id"] == one_unit for i in suggested)
         < len(suggested)
     )
+
+
+def test_resolve_reports_rising_progress_up_to_done(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    seen: list[tuple[str, float]] = []
+
+    resolve_run(
+        settings, "r1", judge=None, min_confidence="low", progress=lambda *a: seen.append(a)
+    )
+
+    fractions: list[float] = [f for _, f in seen]
+    assert fractions == sorted(fractions)
+    assert (fractions[0], fractions[-1]) == (0.0, 1.0)
+    assert [s for s, _ in seen].count("deciding") > 1  # per-crop steps, not just stage starts
+
+
+def wait_for_resolve(state: RunState, timeout: float = 30.0) -> dict[str, Any]:
+    """Poll the UI resolve job like the page does, until it leaves `running`."""
+    deadline: float = time.monotonic() + timeout
+    while (job := api_resolve_status(state))["status"] == "running":
+        assert time.monotonic() < deadline, job
+        time.sleep(0.05)
+    return job
+
+
+def test_ui_resolve_runs_in_background_and_reports_percent(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    state = RunState(settings=settings, run="r1")
+    assert api_resolve_status(state)["status"] == "idle"
+
+    started: dict[str, Any] = start_resolve(state, {"min_confidence": "low"})
+    job: dict[str, Any] = wait_for_resolve(state)
+
+    assert started["status"] == "running"
+    assert (job["status"], job["percent"], job["error"]) == ("done", 100, None)
+    assert job["summary"]["n_crops"] == state.items.height
+    assert "decision" in state.items.columns  # tables reloaded
+
+
+def test_ui_resolve_rejects_a_second_start_and_reports_errors(
+    settings: GallerySettings, reviewed: RunPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = RunState(settings=settings, run="r1")
+    release = threading.Event()
+
+    def blocked(*_a: Any, **_kw: Any) -> None:
+        release.wait(5)
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("cleanup.gallery.server.resolve_run", blocked)
+    start_resolve(state, {})
+    with pytest.raises(ValueError, match="already running"):
+        start_resolve(state, {})
+    release.set()
+
+    job: dict[str, Any] = wait_for_resolve(state)
+
+    assert job["status"] == "error"
+    assert "disk full" in job["error"]
+
+
+def test_accept_relabels_waits_for_a_running_resolve(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
+    state = RunState(settings=settings, run="r1")
+    state.resolve_job.status = "running"
+
+    with pytest.raises(ValueError, match="resolve is running"):
+        api_accept_relabels(state, {"filters": {}})
+    assert jsonl.read(reviewed.events) == []
+
+
+def test_ui_accept_relabels_resolves_in_background(
+    settings: GallerySettings, reviewed: RunPaths
+) -> None:
+    resolve_run(settings, "r1", judge=None, min_confidence="low")
+    state = RunState(settings=settings, run="r1")
+
+    result: dict[str, Any] = api_accept_relabels(state, {"filters": {}}, start_resolve)
+    job: dict[str, Any] = wait_for_resolve(state)
+
+    assert result["accepted"] == job["accepted"] == 2
+    assert job["status"] == "done"
+    assert api_items(state, {"decision": "suggested_relabel"})["total"] == 0
